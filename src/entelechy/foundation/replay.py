@@ -7,15 +7,30 @@ Origin and lineage rebuild structure; the live content store supplies bytes.
 from collections.abc import Collection
 
 from entelechy.foundation.canonical import CanonicalError, Json, digest_of, parse, verify
+from entelechy.foundation.evidence import (
+    Root,
+    classify,
+    ledger,
+    novel_roots,
+    roots_of_many,
+    testimony_root,
+)
 from entelechy.foundation.seed import Manifest, seed_heart
 from entelechy.foundation.store import Store
 from entelechy.foundation.transitions import RecordError, decode_record
 from entelechy.foundation.types import (
     EventRow,
     InfonBody,
+    Mode,
     ObjectHeader,
     ObjectType,
+    Role,
+    Rows,
     Stub,
+    expect_int,
+    expect_list,
+    expect_object,
+    field_of,
 )
 
 
@@ -55,15 +70,136 @@ def rebuild(store: Store, up_to: int | None = None) -> Store:
             fresh.close()
             raise IntegrityError(f"transition {seq} does not match its digest")
         try:
-            decoded = decode_record(parse(record))
+            data = parse(record)
+            decoded = decode_record(data)
         except (CanonicalError, RecordError) as error:
             fresh.close()
             raise IntegrityError(f"transition {seq} is malformed: {error}") from error
         if decoded.seq != seq or decoded.omega_id != omega_id:
             fresh.close()
             raise IntegrityError(f"transition {seq} belongs to another seq or Ω")
-        fresh.apply_replayed(decoded.rows)
+        try:
+            _audit_and_apply(data, decoded.rows, fresh)
+        except BaseException:
+            fresh.close()
+            raise
+    try:
+        _audit_iss3(fresh)
+    except BaseException:
+        fresh.close()
+        raise
     return fresh
+
+
+def _roots_from_canonical(value: Json) -> frozenset[Root]:
+    assert isinstance(value, list)
+    result: set[Root] = set()
+    for item in value:
+        assert isinstance(item, dict)
+        kind, key = item["kind"], item["key"]
+        assert isinstance(kind, str) and isinstance(key, str)
+        result.add(Root(kind, key))
+    return frozenset(result)
+
+
+def _text(data: dict[str, Json], key: str) -> str:
+    value = field_of(data, key)
+    if not isinstance(value, str):
+        raise IntegrityError(f"malformed record: {key!r} is not a string")
+    return value
+
+
+def _audit_and_apply(record: Json, rows: Rows, reader: Store) -> None:
+    """Apply one transition's rows operation by operation, checking EVD-7 for
+    FORM_INFON and REVISE_INFON against `reader`'s state just before each
+    operation — exactly the staged state the validator checked it against
+    (EVD-3). One transition can consolidate an Observation and cite it in
+    the same breath, so this cannot wait until the whole transition lands.
+    """
+    data = expect_object(record, "record")
+    operations = expect_list(field_of(data, "operations"), "record.operations")
+    justification_by_op: dict[int, list[dict[str, Json]]] = {}
+    for entry in expect_list(field_of(data, "justification"), "record.justification"):
+        check = expect_object(entry, "justification entry")
+        if check.get("rule") != "EVD-7":
+            continue
+        op_index = expect_int(field_of(check, "operation"), "justification.operation")
+        justification_by_op.setdefault(op_index, []).append(check)
+
+    versions = iter(rows.versions)
+    provenance = iter(rows.provenance)
+    issues = iter(rows.issues)
+    for op_index, operation_entry_raw in enumerate(operations):
+        operation_entry = expect_object(operation_entry_raw, "operations[i]")
+        operation_name = _text(operation_entry, "operation")
+        version = next(versions)
+        this_provenance = None if operation_name == "FORGET" else next(provenance)
+        this_issue = next(issues) if operation_name == "FORM_INFON" else None
+
+        for check in justification_by_op.get(op_index, []):
+            measured = expect_object(field_of(check, "measured"), "justification.measured")
+            issue = _text(measured, "issue")
+            assert this_provenance is not None
+            inherited = ledger(issue, reader)
+            if operation_name == "FORM_INFON":
+                classification = classify(issue, reader)
+                if classification.value != measured.get("classification"):
+                    raise IntegrityError(
+                        f"issue {issue} does not replay to the recorded ISS-4 classification"
+                    )
+                if this_provenance.mode is Mode.TESTIMONY:
+                    assert this_provenance.organ is not None
+                    candidate = frozenset({testimony_root(this_provenance.organ.id)})
+                else:
+                    candidate = roots_of_many(
+                        (i.ref for i in this_provenance.inputs if i.role is Role.DERIVATION_INPUT),
+                        reader,
+                    )
+            else:
+                candidate = roots_of_many(
+                    (
+                        i.ref
+                        for i in this_provenance.inputs
+                        if i.role in (Role.SUPPORT, Role.COUNTEREVIDENCE)
+                    ),
+                    reader,
+                )
+            if inherited != _roots_from_canonical(field_of(measured, "inherited")):
+                raise IntegrityError(f"Ledger({issue}) does not replay to what was recorded (EVD-7)")
+            if candidate != _roots_from_canonical(field_of(measured, "candidate")):
+                raise IntegrityError(f"candidate roots for {issue} do not replay (EVD-7)")
+            if novel_roots(candidate, inherited) != _roots_from_canonical(field_of(measured, "novel")):
+                raise IntegrityError(f"novel roots for {issue} do not replay (EVD-7)")
+
+        reader.apply_replayed(
+            Rows(
+                provenance=() if this_provenance is None else (this_provenance,),
+                versions=(version,),
+                events=(),
+                issues=() if this_issue is None else (this_issue,),
+            )
+        )
+    reader.apply_replayed(Rows(provenance=(), versions=(), events=rows.events, issues=()))
+
+
+def _audit_iss3(reader: Store) -> None:
+    """ISS-3: every issue has at most one current head, checked over the final state."""
+    issues: dict[str, list[str]] = {}
+    for header in reader.versions():
+        if header.type is not ObjectType.INFON or header.version != 1:
+            continue
+        issue = reader.issue_of(header.id)
+        assert issue is not None
+        issues.setdefault(issue, []).append(header.id)
+    for issue, members in issues.items():
+        heads = [
+            object_id
+            for object_id in members
+            for latest in (reader.latest(object_id),)
+            if latest is not None and latest.retired_by is None and not latest.forgotten
+        ]
+        if len(heads) > 1:
+            raise IntegrityError(f"issue {issue} has more than one current head (ISS-3): {heads}")
 
 
 def replay_current(store: Store) -> str:

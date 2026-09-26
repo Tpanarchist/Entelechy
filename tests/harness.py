@@ -14,13 +14,15 @@ from entelechy.foundation.types import (
     Consolidate,
     FormInfon,
     InfonBody,
+    ObjectReferent,
     ObjectType,
     Observation,
     OrganRef,
     Proposal,
     ProposedOperation,
-    ProvenanceKind,
     RegionReferent,
+    Role,
+    RoleInput,
 )
 from entelechy.foundation.validator import (
     AcceptedTransition,
@@ -68,13 +70,23 @@ def policy_seed() -> SeedSpec:
 def infon_from(
     observation_id: str, relation: str = "R1", confidence: Decimal = Decimal("0.8")
 ) -> FormInfon:
-    """An Infon about a region of an Observation, citing that Observation."""
+    """An Infon about a region of an Observation, derived from that Observation."""
     return FormInfon(
         relation=relation,
         participants=(RegionReferent(observation_id, {"x": 1}),),
         confidence=confidence,
-        provenance_kind=ProvenanceKind.OBSERVATION,
-        inputs=(observation_id,),
+        inputs=(RoleInput(observation_id, Role.DERIVATION_INPUT),),
+    )
+
+
+def form_testimony(
+    self_id: str, relation: str = "R2", confidence: Decimal = Decimal("0.6")
+) -> FormInfon:
+    """An Infon an organ testifies to from its own knowledge, with no inputs (ORG-3)."""
+    return FormInfon(
+        relation=relation,
+        participants=(ObjectReferent(self_id),),
+        confidence=confidence,
     )
 
 

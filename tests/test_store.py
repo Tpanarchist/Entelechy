@@ -9,13 +9,16 @@ from entelechy.foundation.store import Store, StoreError
 from entelechy.foundation.types import (
     EventRow,
     EventType,
+    IssueRow,
+    Mode,
     ObjectHeader,
     ObjectRef,
     ObjectType,
     Operation,
     OrganRef,
     Provenance,
-    ProvenanceKind,
+    ProvenanceInput,
+    Role,
     Rows,
 )
 
@@ -24,7 +27,7 @@ BODY_DIGEST = digest(BODY)
 
 
 def origin_rows() -> Rows:
-    provenance = Provenance("prov:0", ProvenanceKind.ORIGIN, (), None, None, "entelechy-seed/0", 0)
+    provenance = Provenance("prov:0", Mode.ORIGIN, (), None, None, "entelechy-seed/0", 0)
     header = ObjectHeader(
         "self:test", ObjectType.SELF_MAP_ENTRY, 1, "prov:0", (), 0, 0, None, False, BODY_DIGEST
     )
@@ -34,8 +37,8 @@ def origin_rows() -> Rows:
 def later_rows(seq: int) -> Rows:
     provenance = Provenance(
         "prov:1",
-        ProvenanceKind.TESTIMONY,
-        (ObjectRef("self:test", 1),),
+        Mode.TESTIMONY,
+        (ProvenanceInput(ObjectRef("self:test", 1), Role.ATTRIBUTION),),
         Operation.FORM_INFON,
         OrganRef("mind", "1"),
         None,
@@ -44,7 +47,12 @@ def later_rows(seq: int) -> Rows:
     header = ObjectHeader(
         "infon:1", ObjectType.INFON, 1, "prov:1", (), seq, seq, None, False, BODY_DIGEST
     )
-    return Rows((provenance,), (header,), (EventRow(seq, 0, EventType.INFON_FORMED, "infon:1"),))
+    return Rows(
+        (provenance,),
+        (header,),
+        (EventRow(seq, 0, EventType.INFON_FORMED, "infon:1"),),
+        (IssueRow("infon:1", "sha256:" + "0" * 64),),
+    )
 
 
 @pytest.fixture
@@ -124,10 +132,16 @@ def test_reads_return_what_was_written(store: Store) -> None:
     header = store.latest("infon:1")
     assert header is not None and header.body_digest == BODY_DIGEST
     provenance = store.provenance("prov:1")
-    assert provenance is not None and provenance.inputs == (ObjectRef("self:test", 1),)
+    assert provenance is not None and provenance.inputs == (
+        ProvenanceInput(ObjectRef("self:test", 1), Role.ATTRIBUTION),
+    )
     assert store.content(BODY_DIGEST) == BODY
     assert store.events() == [EventRow(1, 0, EventType.INFON_FORMED, "infon:1")]
     assert [h.id for h in store.versions()] == ["infon:1", "self:test"]
+    assert store.issue_of("infon:1") == "sha256:" + "0" * 64
+    assert store.infon_ids_for_issue("sha256:" + "0" * 64) == ["infon:1"]
+    assert store.header_at(ObjectRef("infon:1", 1)) == header
+    assert store.versions_of("infon:1") == [header]
 
 
 def test_seq_is_allocated_once_even_across_reopen_seq2(store: Store, path: Path) -> None:
@@ -151,12 +165,14 @@ def test_content_must_match_its_digest(path: Path) -> None:
     [
         "UPDATE origin SET omega_id = 'someone-else'",
         "DELETE FROM origin",
-        "UPDATE provenance SET kind = 'observation'",
+        "UPDATE provenance SET mode = 'observation'",
         "DELETE FROM provenance_inputs",
         "UPDATE object_versions SET forgotten = 1",
         "DELETE FROM object_versions",
         "DELETE FROM events",
         "UPDATE transitions SET record = x'00'",
+        "DELETE FROM infon_issues",
+        "UPDATE infon_issues SET issue_digest = 'sha256:' || '1' || substr(issue_digest, 2)",
     ],
 )
 def test_append_only_tables_refuse_raw_changes(

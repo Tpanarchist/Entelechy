@@ -1,7 +1,7 @@
 import pytest
 from harness import Harness, tamper
 
-from entelechy.foundation.canonical import canonical_bytes, digest, parse
+from entelechy.foundation.canonical import Json, canonical_bytes, digest, parse
 from entelechy.foundation.replay import (
     HeartView,
     IntegrityError,
@@ -96,3 +96,50 @@ def test_the_live_view_shows_forgotten_content_as_a_stub(policy_heart: Harness) 
     header = view.latest(observation)
     assert header is not None and header.forgotten
     assert view.body(observation) is Stub.CONTENT_FORGOTTEN
+
+
+def _forge_evd7_field(record: bytes, field_name: str, value: Json) -> bytes:
+    data = parse(record)
+    assert isinstance(data, dict)
+    justification = data["justification"]
+    assert isinstance(justification, list)
+    for entry in justification:
+        assert isinstance(entry, dict)
+        if entry.get("rule") == "EVD-7":
+            measured = entry["measured"]
+            assert isinstance(measured, dict)
+            measured[field_name] = value
+    return canonical_bytes(data)
+
+
+def test_a_fabricated_novel_root_does_not_survive_replay_evd7_case31(heart: Harness) -> None:
+    """A validator that claimed a root that does not actually follow from
+    provenance would be caught here: replay independently recomputes every
+    root, ledger and novelty fact from structure alone (EVD-7)."""
+    heart.lifecycle()
+    ((seq, record, _),) = heart.store.transitions()
+    forged = _forge_evd7_field(
+        record, "novel", [{"kind": "testimony", "key": "a-source-nothing-actually-cited"}]
+    )
+    tamper(
+        heart.path,
+        ("transitions_no_update",),
+        "UPDATE transitions SET record = ?, record_digest = ? WHERE seq = ?",
+        (forged, digest(forged), seq),
+    )
+    with pytest.raises(IntegrityError, match="novel roots"):
+        replay_current(heart.store)
+
+
+def test_a_fabricated_classification_does_not_survive_replay_iss4_case31(heart: Harness) -> None:
+    heart.lifecycle()
+    ((seq, record, _),) = heart.store.transitions()
+    forged = _forge_evd7_field(record, "classification", "re_formation")
+    tamper(
+        heart.path,
+        ("transitions_no_update",),
+        "UPDATE transitions SET record = ?, record_digest = ? WHERE seq = ?",
+        (forged, digest(forged), seq),
+    )
+    with pytest.raises(IntegrityError, match="ISS-4 classification"):
+        replay_current(heart.store)

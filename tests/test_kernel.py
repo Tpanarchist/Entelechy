@@ -26,6 +26,8 @@ from entelechy.foundation.types import (
     Polarity,
     ProposedOperation,
     ReviseInfon,
+    Role,
+    RoleInput,
 )
 from entelechy.foundation.validator import CERTAINTY, UNIMPLEMENTED, Rejection
 
@@ -220,12 +222,14 @@ def forget_the_self(kernel: Kernel, observation: str, infon_id: str, fresh: str)
 
 
 def edit_observation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
-    return (Consolidate(fresh), ReviseInfon(observation, 1, body_of(kernel, infon_id), (fresh,)))
+    evidence = (RoleInput(fresh, Role.SUPPORT),)
+    return (Consolidate(fresh), ReviseInfon(observation, 1, body_of(kernel, infon_id), evidence))
 
 
 def change_relation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
     body = replace(body_of(kernel, infon_id), relation="R2")
-    return (Consolidate(fresh), ReviseInfon(infon_id, 1, body, (fresh,)))
+    evidence = (RoleInput(fresh, Role.SUPPORT),)
+    return (Consolidate(fresh), ReviseInfon(infon_id, 1, body, evidence))
 
 
 def unbuilt(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:

@@ -17,11 +17,11 @@ from entelechy.foundation.canonical import (
     parse,
 )
 from entelechy.foundation.types import (
+    Mode,
     ObjectHeader,
     ObjectType,
     OrganRef,
     Provenance,
-    ProvenanceKind,
     Rows,
     expect_list,
     expect_object,
@@ -70,6 +70,7 @@ class SeedSpec:
     theta_retain: Decimal | None = None
     theta_forget: Decimal | None = None
     retention_policy: PolicyRef | None = None
+    interoceptive_channels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -84,10 +85,15 @@ class Manifest:
     theta_retain: Decimal | None
     theta_forget: Decimal | None
     retention_policy: PolicyRef | None
+    interoceptive_channels: tuple[str, ...] = ()
 
     @property
     def self_id(self) -> str:
         return f"self:{self.omega_id}"
+
+    def is_interoceptive(self, channel_id: str) -> bool:
+        """INT-2: the mode a consolidated Observation gets depends on this classification."""
+        return channel_id in self.interoceptive_channels
 
     def to_canonical(self) -> dict[str, Canonical]:
         return {
@@ -105,6 +111,7 @@ class Manifest:
             "retention_policy": None
             if self.retention_policy is None
             else self.retention_policy.to_canonical(),
+            "interoceptive_channels": list(self.interoceptive_channels),
             "seed_objects": [self.self_id],
         }
 
@@ -137,6 +144,9 @@ class Manifest:
                 field_of(parameters, "theta_forget"), "theta_forget"
             ),
             retention_policy=None if policy is None else PolicyRef.from_canonical(policy),
+            interoceptive_channels=expect_texts(
+                field_of(manifest, "interoceptive_channels"), "manifest.interoceptive_channels"
+            ),
         )
 
 
@@ -159,6 +169,11 @@ def check_seed(spec: SeedSpec) -> None:
             decimal_text(value)
         except CanonicalError as error:
             raise SeedError(f"{name} has no canonical form: {error}") from error
+    channel_ids = {ref.id for ref in spec.channels}
+    if len(set(spec.interoceptive_channels)) != len(spec.interoceptive_channels):
+        raise SeedError("interoceptive_channels must not repeat a channel")
+    if not set(spec.interoceptive_channels) <= channel_ids:
+        raise SeedError("interoceptive_channels must be Body channels declared in the seed (INT-1)")
 
 
 def manifest_for(spec: SeedSpec, omega_id: str) -> Manifest:
@@ -172,6 +187,7 @@ def manifest_for(spec: SeedSpec, omega_id: str) -> Manifest:
         theta_retain=spec.theta_retain,
         theta_forget=spec.theta_forget,
         retention_policy=spec.retention_policy,
+        interoceptive_channels=spec.interoceptive_channels,
     )
     # The manifest must rebuild exactly from its own bytes (DEV-2), so every
     # field is checked here, before anything is written anywhere.
@@ -197,7 +213,7 @@ def seed_heart(manifest: Manifest) -> tuple[Rows, dict[str, bytes]]:
     body_digest = digest(body)
     provenance = Provenance(
         id=f"prov:origin:{manifest.omega_id}",
-        kind=ProvenanceKind.ORIGIN,
+        mode=Mode.ORIGIN,
         inputs=(),
         operation=None,
         organ=None,

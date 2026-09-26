@@ -18,14 +18,28 @@ class ObjectType(enum.StrEnum):
     SELF_MAP_ENTRY = "SelfMapEntry"
 
 
-class ProvenanceKind(enum.StrEnum):
+class Mode(enum.StrEnum):
+    """Production mode (FOUNDATIONS §5). Assigned by the kernel or validator; no organ supplies it (PRV-8)."""
+
     ORIGIN = "origin"
     OBSERVATION = "observation"
+    SELF_OBSERVATION = "self-observation"
     TESTIMONY = "testimony"
+    ATTRIBUTED = "attributed"
     DERIVATION = "derivation"
+    REVISION = "revision"
     SIMULATION = "simulation"
     EXPERIMENT = "experiment"
-    SELF_OBSERVATION = "self-observation"
+
+
+class Role(enum.StrEnum):
+    """A provenance input's role (ROL-1). Governs whether it passes roots and to what it is eligible."""
+
+    SUPPORT = "support"
+    COUNTEREVIDENCE = "counterevidence"
+    DERIVATION_INPUT = "derivation_input"
+    REVISION_TARGET = "revision_target"
+    ATTRIBUTION = "attribution"
 
 
 class Polarity(enum.StrEnum):
@@ -298,12 +312,39 @@ class ObjectHeader:
 
 
 @dataclass(frozen=True)
+class ProvenanceInput:
+    """One provenance input: which version, under what role (ROL-1)."""
+
+    ref: ObjectRef
+    role: Role
+
+    def to_canonical(self) -> dict[str, Canonical]:
+        return {"ref": self.ref.to_canonical(), "role": self.role.value}
+
+    @classmethod
+    def from_canonical(cls, value: Json) -> ProvenanceInput:
+        data = expect_object(value, "provenance input")
+        return cls(
+            ref=ObjectRef.from_canonical(field_of(data, "ref")),
+            role=expect_enum(Role, field_of(data, "role"), "input.role"),
+        )
+
+
+@dataclass(frozen=True)
+class RoleInput:
+    """An organ's proposed reference to an object, under a role it claims (ROL-3, ROL-5)."""
+
+    object_id: str
+    role: Role
+
+
+@dataclass(frozen=True)
 class Provenance:
     """How a commitment came to be (FOUNDATIONS §5). Never modified once written."""
 
     id: str
-    kind: ProvenanceKind
-    inputs: tuple[ObjectRef, ...]
+    mode: Mode
+    inputs: tuple[ProvenanceInput, ...]
     operation: Operation | None
     organ: OrganRef | None
     seed_spec: str | None
@@ -312,8 +353,8 @@ class Provenance:
     def to_canonical(self) -> dict[str, Canonical]:
         return {
             "id": self.id,
-            "kind": self.kind.value,
-            "inputs": [ref.to_canonical() for ref in self.inputs],
+            "mode": self.mode.value,
+            "inputs": [item.to_canonical() for item in self.inputs],
             "operation": None if self.operation is None else self.operation.value,
             "organ": None if self.organ is None else self.organ.to_canonical(),
             "seed_spec": self.seed_spec,
@@ -327,9 +368,9 @@ class Provenance:
         organ = field_of(data, "organ")
         return cls(
             id=expect_text(field_of(data, "id"), "provenance.id"),
-            kind=expect_enum(ProvenanceKind, field_of(data, "kind"), "provenance.kind"),
+            mode=expect_enum(Mode, field_of(data, "mode"), "provenance.mode"),
             inputs=tuple(
-                ObjectRef.from_canonical(item)
+                ProvenanceInput.from_canonical(item)
                 for item in expect_list(field_of(data, "inputs"), "provenance.inputs")
             ),
             operation=None
@@ -469,12 +510,32 @@ class OperationEntry:
 
 
 @dataclass(frozen=True)
+class IssueRow:
+    """Binds an Infon's identity, once, to its IssueDigest (INF-7, ISS-2). Never repeated or changed."""
+
+    object_id: str
+    issue_digest: str
+
+    def to_canonical(self) -> dict[str, Canonical]:
+        return {"object": self.object_id, "issue": self.issue_digest}
+
+    @classmethod
+    def from_canonical(cls, value: Json) -> IssueRow:
+        data = expect_object(value, "issue row")
+        return cls(
+            object_id=expect_text(field_of(data, "object"), "issue.object"),
+            issue_digest=expect_text(field_of(data, "issue"), "issue.issue"),
+        )
+
+
+@dataclass(frozen=True)
 class Rows:
     """The Heart rows one transition, or the seed, produces."""
 
     provenance: tuple[Provenance, ...]
     versions: tuple[ObjectHeader, ...]
     events: tuple[EventRow, ...] = ()
+    issues: tuple[IssueRow, ...] = ()
 
 
 # Proposals. Organs build these; only the validator turns them into transitions.
@@ -487,11 +548,17 @@ class Consolidate:
 
 @dataclass(frozen=True)
 class FormInfon:
+    """Mode is never supplied here (PRV-8): the validator derives it from the roles of `inputs`.
+
+    No inputs is `testimony` (ORG-3); inputs that are all `attribution` is
+    `attributed` (ORG-4); otherwise `derivation`. ROL-3 restricts an organ to
+    the roles `derivation_input` and `attribution` for formation.
+    """
+
     relation: str
     participants: tuple[Referent, ...]
     confidence: Decimal
-    provenance_kind: ProvenanceKind
-    inputs: tuple[str, ...]
+    inputs: tuple[RoleInput, ...] = ()
     context: dict[str, Json] = field(default_factory=dict)
     polarity: Polarity = Polarity.POSITIVE
     derived_from: tuple[str, ...] = ()
@@ -499,10 +566,16 @@ class FormInfon:
 
 @dataclass(frozen=True)
 class ReviseInfon:
+    """`evidence` roles are restricted to `support`, `counterevidence` and `attribution` (ROL-3).
+
+    The validator adds a `revision_target` input naming the version revised;
+    an organ cannot supply that role itself.
+    """
+
     infon_id: str
     expected_version: int
     body: InfonBody
-    evidence: tuple[str, ...]
+    evidence: tuple[RoleInput, ...] = ()
 
 
 @dataclass(frozen=True)
