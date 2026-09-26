@@ -239,7 +239,7 @@ class Validator:
             case ReviseInfon():
                 return self._revise_infon(index, operation, proposal, work)
             case Forget():
-                return [Violation(UNIMPLEMENTED, "FORGET is not built yet")]
+                return self._forget(index, operation, work)
             case OtherOperation():
                 return self._other(operation)
 
@@ -552,6 +552,52 @@ class Validator:
             Check(index, CERTAINTY, {"open_interval": True}),
         ]
         work.emit(EventType.INFON_REVISED, header.id)
+        return []
+
+    # FORGET
+
+    def _forget(self, index: int, op: Forget, work: _Work) -> list[Violation]:
+        header = work.latest(op.object_id)
+        if header is None:
+            if op.object_id in work.transient:
+                return [Violation("MEM-3", "transient state lapses on its own; FORGET is for the Heart")]
+            return [Violation("MEM-3", f"there is no persistent object {op.object_id}")]
+        provenance = work.provenance_of(header.provenance_id)
+        if provenance is not None and provenance.kind is ProvenanceKind.ORIGIN:
+            return [Violation("MEM-4", "seed structure cannot be forgotten")]
+        if header.forgotten:
+            return [Violation("MEM-3", f"{op.object_id} is already forgotten")]
+        if op.expected_version != header.version:
+            return [
+                Violation(
+                    "PER-6",
+                    "the proposal forgets a stale version",
+                    {"expected": op.expected_version, "current": header.version},
+                )
+            ]
+        if op.successor is not None:
+            return [Violation(UNIMPLEMENTED, "compression into a successor needs Patterns or Forms")]
+        if not op.reason.strip():
+            return [Violation("MEM-3", "FORGET requires a reason")]
+        body = work.content(header.body_digest)
+        if body is None:
+            return [Violation("MEM-3", f"the content of {op.object_id} is missing")]
+        outcome = self._retention(index, header.type, body, "MEM-2", "theta_forget", at_least=False)
+        if isinstance(outcome, Violation):
+            return [outcome]
+
+        forgotten = replace(
+            header,
+            version=header.version + 1,
+            seq=work.seq,
+            retired_by=header.retired_by if header.retired_by is not None else work.seq,
+            forgotten=True,
+        )
+        work.prior.append(header.ref())
+        work.stage(forgotten, None, None)
+        work.operations.append(OperationEntry(Operation.FORGET, header.id, op.reason))
+        work.checks.append(outcome)
+        work.emit(EventType.MEMORY_FORGOTTEN, header.id)
         return []
 
     # Everything else
