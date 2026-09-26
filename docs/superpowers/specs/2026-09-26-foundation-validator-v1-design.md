@@ -386,5 +386,6 @@ These gaps were found while designing and are resolved in FOUNDATIONS 0.4:
 
 ## 12. Recorded, Not Blocking
 
+- **Creating a Heart.** `Kernel.create` builds the Heart under a temporary name in the same directory, closes it, and publishes it with a hard link, which refuses an existing target. A failure before publication leaves nothing at the target path. The no-overwrite behaviour is tested on Windows (NTFS) only; POSIX `link(2)` gives the same refusal but is untested here, and a filesystem without hard links cannot create Hearts. Durability against power loss beyond SQLite's own guarantees is a later systems concern.
 - **Secure forgetting (OPEN-16).** `FORGET` in v1 is logical forgetting (MEM-6). Retained digests let someone confirm a guess, so low-entropy forgotten content can still be recovered by guessing. Secure erasure would cost content addressing and deduplication, and is deferred.
 - **Implementation identity (OPEN-15).** v1 identifies organs and retention policies by name and version only. A label does not prove that tomorrow's code called version 1 is the same code. A later version should identify executable components by artifact digest, $\langle name,\ version,\ digest \rangle$.

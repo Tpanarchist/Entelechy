@@ -6,8 +6,10 @@ validator does. Organs never receive a Store.
 """
 
 import json
+import os
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -231,8 +233,42 @@ class Store:
             connection = cls._connect(str(path))
         except sqlite3.Error as error:
             raise StoreError(f"cannot create {path}: {error}") from error
-        connection.executescript(_SCHEMA)
+        try:
+            connection.executescript(_SCHEMA)
+        except BaseException:
+            connection.close()
+            raise
         return cls(connection)
+
+    @classmethod
+    def build(cls, path: Path, initialize: Callable[[Store], None]) -> None:
+        """Build a complete Heart and publish it at `path` only if `path` does not exist.
+
+        The Heart is built under a temporary name in the same directory and
+        closed before it is published, so a failure before publication leaves
+        nothing at `path`, and the temporary files are removed. Publication is
+        a hard link: link(2) on POSIX and CreateHardLink on Windows both refuse
+        an existing target, so an existing file is never replaced. That refusal
+        is tested on Windows (NTFS) only, and publication needs a filesystem
+        that supports hard links. A process killed mid-build can leave a
+        temporary file behind, but never a partial Heart at `path`.
+        """
+        if path.exists():
+            raise StoreError(f"{path} already exists; refusing to overwrite it")
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.creating")
+        try:
+            store = cls.create(temporary)
+            try:
+                initialize(store)
+            finally:
+                store.close()
+            try:
+                os.link(temporary, path)
+            except FileExistsError as error:
+                raise StoreError(f"{path} already exists; refusing to overwrite it") from error
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                temporary.with_name(temporary.name + suffix).unlink(missing_ok=True)
 
     @classmethod
     def memory(cls) -> Store:

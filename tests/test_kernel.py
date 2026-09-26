@@ -1,10 +1,12 @@
 """E000: the first lawful Heart, end to end through the kernel and its ports."""
 
+import itertools
 import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from harness import EYE, MIND, FixedRetention, infon_from, plain_seed, policy_seed, tamper
@@ -93,28 +95,38 @@ def test_a_body_channel_delivers_only_as_its_own_channel_org6(tmp_path: Path) ->
         assert isinstance(body, dict) and body["channel"] == EYE.to_canonical()
 
 
-def test_each_port_acts_only_as_its_own_identity_org6(tmp_path: Path) -> None:
-    ear, scribe = OrganRef("ear", "1"), OrganRef("scribe", "1")
-    seed = SeedSpec(relations=("R1",), channels=(EYE, ear), organs=(MIND, scribe))
+CHANNELS = (EYE, OrganRef("ear", "1"), OrganRef("nose", "1"))
+ORGANS = (MIND, OrganRef("scribe", "1"), OrganRef("critic", "1"))
+# (channel index, organ index) for each use: aperiodic, with back-to-back reuse.
+PLAN = [(1, 2), (1, 0), (0, 1), (2, 2), (2, 2), (0, 0), (1, 1), (2, 0)]
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))), ids=str)
+def test_each_port_acts_only_as_its_own_identity_org6(
+    tmp_path: Path, order: tuple[int, ...]
+) -> None:
+    # Ports are made in every order (organs in reverse), all before use, and
+    # used in an order unrelated to either. A kernel that picks identity by
+    # registration slot, creation order, recency or call count fails here.
     path = tmp_path / "heart.db"
-    with Kernel.create(path, seed) as kernel:
-        # Wire every port up front, as a host would, then use them in an order
-        # unrelated to the order they were made in, reusing one of each kind.
-        eye_port, ear_port = kernel.body_channel(EYE), kernel.body_channel(ear)
-        mind_port, scribe_port = kernel.organ(MIND), kernel.organ(scribe)
-        heard = ear_port.receive("hello")
-        seen = eye_port.receive("red")
-        heard_again = ear_port.receive("again")
-        by_mind = ok(mind_port.propose(Consolidate(seen), infon_from(seen)))
-        by_scribe = ok(scribe_port.propose(Consolidate(heard), infon_from(heard)))
-        by_mind_again = ok(mind_port.propose(Consolidate(heard_again), infon_from(heard_again)))
+    uses: list[tuple[str, OrganRef, Accepted, OrganRef]] = []
+    with Kernel.create(path, SeedSpec(("R1",), CHANNELS, ORGANS)) as kernel:
+        channel_ports = {CHANNELS[i]: kernel.body_channel(CHANNELS[i]) for i in order}
+        organ_ports = {ORGANS[i]: kernel.organ(ORGANS[i]) for i in reversed(order)}
+        for ref, channel_port in channel_ports.items():
+            assert channel_port.channel == ref
+        for ref, organ_port in organ_ports.items():
+            assert organ_port.organ == ref
+        for c, o in PLAN:
+            channel, organ = CHANNELS[order[c]], ORGANS[order[o]]
+            observation = channel_ports[channel].receive("x")
+            result = ok(
+                organ_ports[organ].propose(Consolidate(observation), infon_from(observation))
+            )
+            uses.append((observation, channel, result, organ))
     reader = Store.open_readonly(path)
     records = {seq: parse(record) for seq, record, _ in reader.transitions()}
-    for observation, channel, accepted, organ in (
-        (heard, ear, by_scribe, scribe),
-        (seen, EYE, by_mind, MIND),
-        (heard_again, ear, by_mind_again, MIND),
-    ):
+    for observation, channel, accepted, organ in uses:
         observed = reader.latest(observation)
         assert observed is not None
         observed_provenance = reader.provenance(observed.provenance_id)
@@ -408,6 +420,48 @@ def test_a_failed_origin_write_leaves_no_file(
     with pytest.raises(RuntimeError, match="power cut"):
         Kernel.create(path, plain_seed())
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_real_failure_while_building_the_schema_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_connect = Store._connect
+
+    def tiny_disk(target: str) -> sqlite3.Connection:
+        connection = real_connect(target)
+        connection.execute("PRAGMA max_page_count = 2")
+        return connection
+
+    monkeypatch.setattr(Store, "_connect", staticmethod(tiny_disk))
+    with pytest.raises(sqlite3.OperationalError, match="full"):
+        Kernel.create(tmp_path / "heart.db", plain_seed())
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_target_that_appears_during_creation_is_never_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "heart.db"
+    real_write_origin = Store.write_origin
+
+    def someone_else_arrives(self: Store, *args: Any) -> None:
+        real_write_origin(self, *args)
+        path.write_bytes(b"someone else's file")
+
+    monkeypatch.setattr(Store, "write_origin", someone_else_arrives)
+    with pytest.raises(StoreError, match="already exists"):
+        Kernel.create(path, plain_seed())
+    assert path.read_bytes() == b"someone else's file"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["heart.db"]
+
+
+def test_successful_creation_leaves_only_an_openable_heart(tmp_path: Path) -> None:
+    path = tmp_path / "heart.db"
+    with Kernel.create(path, plain_seed()) as kernel:
+        created = kernel.heart.digest()
+    assert [entry.name for entry in tmp_path.iterdir()] == ["heart.db"]
+    with Kernel.open(path) as reopened:
+        assert reopened.replay_current() == created
 
 
 def test_create_refuses_an_existing_heart_and_leaves_it_intact(tmp_path: Path) -> None:
