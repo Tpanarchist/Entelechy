@@ -4,6 +4,7 @@ from pathlib import Path
 from harness import FixedRetention, Harness, policy_seed, rejected
 
 from entelechy.foundation.types import (
+    Consolidate,
     EventType,
     Forget,
     FormInfon,
@@ -41,6 +42,16 @@ def test_a_score_above_the_threshold_is_not_forgotten_mem2(tmp_path: Path) -> No
     heart = Harness(tmp_path / "heart.db", policy_seed(), FixedRetention(Decimal("0.9")))
     observation, _ = heart.lifecycle()
     assert rejected(heart.propose(Forget(observation, 1, "compressing"))).rules == {"MEM-2"}
+    heart.close()
+
+
+def test_a_retention_score_with_no_canonical_form_is_rejected_not_raised(tmp_path: Path) -> None:
+    heart = Harness(tmp_path / "heart.db", policy_seed(), FixedRetention(Decimal("1E-200")))
+    observation = heart.receive()
+    assert rejected(heart.propose(Consolidate(observation))).rules == {"MEM-1"}
+    lifecycle_observation, _ = heart.lifecycle()
+    forget = Forget(lifecycle_observation, 1, "compressing")
+    assert rejected(heart.propose(forget)).rules == {"MEM-2"}
     heart.close()
 
 

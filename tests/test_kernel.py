@@ -9,10 +9,11 @@ from pathlib import Path
 import pytest
 from harness import EYE, MIND, FixedRetention, infon_from, plain_seed, policy_seed, tamper
 
-from entelechy.foundation.canonical import CanonicalError, Json
+from entelechy.foundation.canonical import CanonicalError, Json, parse
 from entelechy.foundation.kernel import Accepted, BodyChannel, Kernel, KernelError, OrganPort
 from entelechy.foundation.replay import IntegrityError
-from entelechy.foundation.store import StoreError
+from entelechy.foundation.seed import SeedSpec
+from entelechy.foundation.store import Store, StoreError
 from entelechy.foundation.types import (
     Consolidate,
     EventType,
@@ -90,6 +91,35 @@ def test_a_body_channel_delivers_only_as_its_own_channel_org6(tmp_path: Path) ->
         ok(kernel.organ(MIND).propose(Consolidate(observation), infon_from(observation)))
         body = kernel.heart.body(observation)
         assert isinstance(body, dict) and body["channel"] == EYE.to_canonical()
+
+
+def test_each_port_acts_only_as_its_own_identity_org6(tmp_path: Path) -> None:
+    ear, scribe = OrganRef("ear", "1"), OrganRef("scribe", "1")
+    seed = SeedSpec(relations=("R1",), channels=(EYE, ear), organs=(MIND, scribe))
+    path = tmp_path / "heart.db"
+    with Kernel.create(path, seed) as kernel:
+        heard = kernel.body_channel(ear).receive("hello")
+        seen = kernel.body_channel(EYE).receive("red")
+        by_scribe = ok(kernel.organ(scribe).propose(Consolidate(heard), infon_from(heard)))
+        by_mind = ok(kernel.organ(MIND).propose(Consolidate(seen), infon_from(seen)))
+    reader = Store.open_readonly(path)
+    records = {seq: parse(record) for seq, record, _ in reader.transitions()}
+    for observation, channel, accepted, organ in (
+        (heard, ear, by_scribe, scribe),
+        (seen, EYE, by_mind, MIND),
+    ):
+        observed = reader.latest(observation)
+        assert observed is not None
+        observed_provenance = reader.provenance(observed.provenance_id)
+        assert observed_provenance is not None and observed_provenance.organ == channel
+        (infon_id,) = [object_id for object_id in accepted.created if object_id != observation]
+        infon = reader.latest(infon_id)
+        assert infon is not None
+        infon_provenance = reader.provenance(infon.provenance_id)
+        assert infon_provenance is not None and infon_provenance.organ == organ
+        record = records[accepted.seq]
+        assert isinstance(record, dict) and record["proposer"] == organ.to_canonical()
+    reader.close()
 
 
 def test_an_organ_port_proposes_only_as_its_own_organ_org6(tmp_path: Path) -> None:
@@ -269,6 +299,21 @@ def test_identifiers_must_be_a_list_not_one_string(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         with pytest.raises(CanonicalError, match="identifiers"):
             kernel.body_channel(EYE).receive("red", "abc")
+
+
+@pytest.mark.parametrize("identifiers", [None, {"track-7": 1}], ids=["none", "dict"])
+def test_identifiers_must_be_a_list_or_tuple(tmp_path: Path, identifiers: object) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(CanonicalError, match="identifiers"):
+            kernel.body_channel(EYE).receive("red", identifiers)  # type: ignore[arg-type]
+
+
+def test_unencodable_identifiers_are_refused_before_they_use_a_seq(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(CanonicalError):
+            kernel.body_channel(EYE).receive("red", ["photo-\udcff.jpg"])
+        first_lifecycle(kernel)
+        assert kernel.heart.events()[-1].seq == 2
 
 
 def test_identifiers_must_be_strings(tmp_path: Path) -> None:

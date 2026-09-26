@@ -69,6 +69,7 @@ def test_seed_heart_is_rebuilt_exactly_from_the_manifest_dev2() -> None:
         (SeedSpec(("",), (EYE,), (MIND,)), "relations"),
         (SeedSpec(("R1",), (EYE,), (MIND,), theta_retain=Decimal("1.5")), "theta_retain"),
         (SeedSpec(("R1",), (EYE,), (MIND,), theta_forget=Decimal("NaN")), "theta_forget"),
+        (SeedSpec(("R1",), (EYE,), (MIND,), theta_retain=Decimal("1E-200")), "theta_retain"),
     ],
 )
 def test_invalid_seeds_are_refused(spec: SeedSpec, message: str) -> None:

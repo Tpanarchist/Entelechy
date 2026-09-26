@@ -78,7 +78,7 @@ src/entelechy/foundation/
 tests/
 ```
 
-`kernel.py` is an addition to the seven modules in the original proposal. It is the one object an organ can hold, and it exposes no store.
+`kernel.py` is an addition to the seven modules in the original proposal. The host holds the Kernel; each organ holds only the port bound to it (§6.4). Neither exposes a store.
 
 ---
 
@@ -92,6 +92,7 @@ Every persistent structure has exactly one byte representation before it is hash
 - **Allowed values:** `null`, booleans, integers, strings, arrays, and objects with string keys. Nothing else, so distinct values never share bytes.
 - **Floats are forbidden.** Float formatting is where hash drift comes from.
 - **Decimals belong to typed schemas.** Non-integer quantities such as confidence are `decimal.Decimal`. The generic encoder refuses them; the typed schema that owns the field writes it as a normalized fixed-point string such as `"0.8"` and decodes it by field. If the generic encoder accepted Decimals, `Decimal("0.8")` and the string `"0.8"` would share one encoding.
+- **Decimal text is exact and bounded.** It is built from the Decimal's own digits, so it never rounds and does not depend on the process's decimal context. Text longer than 100 characters is refused, and a value that cannot be encoded is rejected before anything is stored.
 - **Dates and times are rejected by the encoder** (SEQ-3).
 - Every encoded structure carries `type` and `schema` fields.
 
@@ -340,7 +341,8 @@ This differs from the lifecycle in the original proposal, where `CONSOLIDATE O1`
 | A transition fails partway | Fault injection mid-commit leaves no rows (PER-5). |
 | Changing an Infon's relation through `ReviseInfon` | Rejected: INF-4 and OBJ-4. A successor is required. |
 | Removing an object with raw `DELETE` | The trigger aborts. |
-| A proposal from an unregistered organ | Rejected: ORG-2 |
+| A proposal from an unregistered organ | The kernel refuses to make a port for it: `KernelError` citing ORG-2. The validator also rejects such a proposal under ORG-2. |
+| A Mind organ delivering an Observation, or a Body channel proposing | The kernel refuses the port: `KernelError` citing ORG-6. |
 | A relation outside the vocabulary | Rejected: INF-1 |
 | Confidence 0 or 1 | Rejected: `V1-CERTAINTY` |
 | `Forget` on the Self Map's self-reference | Rejected: MEM-4 |
@@ -362,7 +364,7 @@ A tampering test edits a transition record's bytes directly in the database file
 
 These are choices I made that the design discussion did not settle.
 
-1. `kernel.py` is added as the organ-facing facade.
+1. `kernel.py` is added to hold the Kernel and the ports organs act through.
 2. Floats are forbidden in canonical content, and confidence is a `Decimal`.
 3. Objects are split into a header, which is never forgotten, and a content-addressed body, which `FORGET` can remove. Every version is immutable.
 4. Content is deduplicated by digest, and a trigger stops one `FORGET` from deleting a body that another live object still shares.

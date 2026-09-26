@@ -151,8 +151,14 @@ def check_seed(spec: SeedSpec) -> None:
     if len(set(spec.relations)) != len(spec.relations) or not all(spec.relations):
         raise SeedError("relations must be unique, non-empty names")
     for name, value in (("theta_retain", spec.theta_retain), ("theta_forget", spec.theta_forget)):
-        if value is not None and not (value.is_finite() and 0 <= value <= 1):
+        if value is None:
+            continue
+        if not (value.is_finite() and 0 <= value <= 1):
             raise SeedError(f"{name} must be a decimal within [0, 1]")
+        try:
+            decimal_text(value)
+        except CanonicalError as error:
+            raise SeedError(f"{name} has no canonical form: {error}") from error
 
 
 def manifest_for(spec: SeedSpec, omega_id: str) -> Manifest:

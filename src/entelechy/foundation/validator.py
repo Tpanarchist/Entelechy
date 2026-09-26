@@ -324,11 +324,13 @@ class Validator:
         if threshold is None or self._policy is None:
             return Violation(rule, "the retention clause needs a bound parameter and policy", unbound)
         score = self._policy.score(object_type, body)
-        if not score.is_finite():
-            return Violation(rule, "the retention policy returned a non-finite score")
+        try:
+            score_text = decimal_text(score)
+        except CanonicalError as error:
+            return Violation(rule, f"the retention policy returned an unusable score: {error}")
         measured: dict[str, Canonical] = {
             "clause": "retention",
-            "score": decimal_text(score),
+            "score": score_text,
             parameter: decimal_text(threshold),
             "policy": f"{self._policy.name}@{self._policy.version}",
         }

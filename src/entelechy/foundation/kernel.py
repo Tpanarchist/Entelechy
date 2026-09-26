@@ -188,15 +188,16 @@ class Kernel:
     # Called only by ports, which supply the identity.
 
     def _receive(self, channel: OrganRef, content: Json, identifiers: Sequence[str]) -> str:
-        if isinstance(identifiers, str):
-            raise CanonicalError("identifiers must be a list of strings, not one string")
+        if not isinstance(identifiers, (list, tuple)):
+            raise CanonicalError("identifiers must be a list of strings")
         names = tuple(identifiers)
         if not all(isinstance(name, str) for name in names):
             raise CanonicalError("identifiers must all be strings")
         # Keep a canonical snapshot, not the caller's object: a channel that
-        # reuses its buffer must not rewrite what was received (OBS-1). This
-        # also refuses non-canonical content before a seq is used.
+        # reuses its buffer must not rewrite what was received (OBS-1). Both
+        # content and identifiers must encode before a seq is used.
         snapshot = parse(canonical_bytes(content))
+        canonical_bytes(list(names))
         seq = self._store.allocate_seq()
         observation = Observation(f"obs:{uuid.uuid4()}", channel, seq, snapshot, names)
         self._transient[observation.id] = observation

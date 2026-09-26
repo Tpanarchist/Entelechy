@@ -242,13 +242,15 @@ Organs are the replaceable machinery through which Entelechy perceives, computes
 - **ORG-3** Content an organ supplies from its own pretraining, rather than from Entelechy's experience, MUST carry `testimony` provenance naming that organ. This keeps knowledge inherited from a pretrained model distinguishable from knowledge Entelechy learned.
 - **ORG-4** Language is a codec. When someone says $X$, the fact that they said it MAY be committed as an `observation`, but $X$ itself MUST enter as `testimony` attributed to the speaker. It MUST NOT be committed as an observation of the world.
 - **ORG-5** An organ's internal parameters, such as neural weights, are organ state, not Heart state, and MAY change during training. Putting a new organ version into service is a `CHANGE_ORGAN` transition. Its provenance MUST reference the experience the organ was trained on. Existing Models are not affected (MOD-12).
-- **ORG-6** Authority-bearing identity comes from capability, not payload:
+- **ORG-6**
 
   $$
   \boxed{\text{Authority-bearing identity comes from capability, not payload.}}
   $$
 
-  The identity an organ or Body channel acts under MUST be established by the interface it acts through, never by data it supplies. A Body channel delivers Observations only through a port bound to that channel, and a Mind organ proposes only through a port bound to that organ. A payload may say anything; what it says about its own origin carries no authority. This is what keeps observation distinct from testimony (ORG-4, PRV-6): an organ that is not a channel has no way to deliver an Observation.
+  The identity an organ or Body channel acts under MUST be established by the interface it acts through, never by data it supplies. A Body channel delivers Observations only through a port bound to that channel, and a Mind organ proposes only through a port bound to that organ.
+
+  What a port authenticates is identity: which channel delivered an Observation, and which organ proposed a transition. It does not authenticate claims inside the payload. The provenance kind of an Infon, for example, remains a claim attributed to the authenticated organ (ORG-3, ORG-4), not a verified fact. What ORG-6 guarantees is that an organ which is not a Body channel has no way to deliver an Observation, and no way to propose under another organ's name.
 
 ---
 

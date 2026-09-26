@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from entelechy.foundation.canonical import (
+    MAX_DECIMAL_TEXT,
     CanonicalError,
     canonical_bytes,
     decimal_text,
@@ -74,6 +75,15 @@ def test_decimal_text_is_exact_and_ignores_the_ambient_context() -> None:
 def test_decimal_text_refuses_unbounded_lengths() -> None:
     with pytest.raises(CanonicalError, match="too long"):
         decimal_text(Decimal("1E-1000030"))
+
+
+def test_the_decimal_length_bound_counts_the_text_exactly() -> None:
+    longest = "0." + "1" * (MAX_DECIMAL_TEXT - 2)
+    assert decimal_text(Decimal(longest)) == longest
+    with pytest.raises(CanonicalError, match="too long"):
+        decimal_text(Decimal(longest + "1"))
+    # A Decimal made from a float is long but well within the bound.
+    assert decimal_text(Decimal(0.7)).startswith("0.69999")
 
 
 def test_integers_too_large_to_encode_are_canonical_errors() -> None:

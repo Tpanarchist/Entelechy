@@ -42,7 +42,13 @@ def decimal_text(value: Decimal) -> str:
         return "0"
     significant = digits.rstrip("0")
     exponent += len(digits) - len(significant)
-    if len(significant) + abs(exponent) + 2 > MAX_DECIMAL_TEXT:
+    if exponent >= 0:
+        length = len(significant) + exponent
+    elif -exponent < len(significant):
+        length = len(significant) + 1
+    else:
+        length = 2 - exponent
+    if sign + length > MAX_DECIMAL_TEXT:
         raise CanonicalError(f"decimal {value} is too long for canonical text")
     if exponent >= 0:
         text = significant + "0" * exponent
