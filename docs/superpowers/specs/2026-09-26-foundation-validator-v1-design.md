@@ -20,6 +20,9 @@ E000 is complete when the kernel can do all of the following:
 
 Models, Predictions, Forms, Patterns, Skills, salience, Will, Manas, learning of any kind, neural dependencies, network access, async, ORMs and plugin architecture.
 
+- **Concurrency.** E000 supports exactly one writable kernel per Heart, with serial calls to `receive` and `propose`. Multi-writer concurrency is undefined and deferred.
+- **Sandboxing.** The threat model is organs that are epistemically untrusted, not hostile native code. The capability token and private attributes are architectural discipline. Code in the same process, or with access to the database file, can get around them.
+
 ---
 
 ## 2. Principles
@@ -86,8 +89,9 @@ tests/
 Every persistent structure has exactly one byte representation before it is hashed.
 
 - **Encoding:** JSON, UTF-8, keys sorted by code point, separators `,` and `:`, no insignificant whitespace, `ensure_ascii=False`.
-- **Allowed values:** `null`, booleans, integers, strings, arrays, and objects with string keys.
-- **Floats are forbidden.** Float formatting is where hash drift comes from. Non-integer quantities such as confidence are `decimal.Decimal` and are encoded as a normalized fixed-point string such as `"0.8"`. They are decoded by field type.
+- **Allowed values:** `null`, booleans, integers, strings, arrays, and objects with string keys. Nothing else, so distinct values never share bytes.
+- **Floats are forbidden.** Float formatting is where hash drift comes from.
+- **Decimals belong to typed schemas.** Non-integer quantities such as confidence are `decimal.Decimal`. The generic encoder refuses them; the typed schema that owns the field writes it as a normalized fixed-point string such as `"0.8"` and decodes it by field. If the generic encoder accepted Decimals, `Decimal("0.8")` and the string `"0.8"` would share one encoding.
 - **Dates and times are rejected by the encoder** (SEQ-3).
 - Every encoded structure carries `type` and `schema` fields.
 
@@ -265,7 +269,7 @@ Some things FOUNDATIONS permits, v1 cannot yet check. v1 rejects them under its 
 - **Context:** stored as an opaque canonical map in v1. The validator does not interpret it.
 - **Provenance kinds:** v1 accepts `observation`, `testimony`, `derivation` and `self-observation`.
 - **PRV-3:** acyclicity is structural. Inputs must already exist, so a new object can never be its own input.
-- **REVISE_INFON:** v1 requires at least one evidence input that is not already in the Infon's prior provenance.
+- **REVISE_INFON:** the revised version's `derivation` provenance cites the version it revises and the new evidence. At least one evidence input must be new, judged per `(id, version)`, and an Infon is never evidence for its own revision.
 
 ### Memory specifics
 
