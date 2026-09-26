@@ -1,7 +1,10 @@
-"""The kernel: the only object an organ holds.
+"""The kernel and the ports organs act through.
 
-Organ -> Kernel -> Validator -> Store. The kernel never hands out its Store,
-so Law 5 is architectural rather than conventional.
+Organ -> Port -> Kernel -> Validator -> Store. The host holds the Kernel and
+wires one port to each organ: a BodyChannel to each Body component and an
+OrganPort to each Mind organ. Identity comes from which port delivered
+something, never from data the organ supplies (ORG-6). The kernel never hands
+out its Store, so Law 5 is architectural rather than conventional.
 """
 
 import uuid
@@ -20,6 +23,7 @@ from entelechy.foundation.types import (
     Operation,
     OrganRef,
     Proposal,
+    ProposedOperation,
 )
 from entelechy.foundation.validator import (
     AcceptedTransition,
@@ -27,6 +31,8 @@ from entelechy.foundation.validator import (
     RetentionPolicy,
     Validator,
 )
+
+_PORT_KEY = object()
 
 
 class KernelError(Exception):
@@ -51,8 +57,63 @@ def _resolve_policy(
     raise KernelError(f"the seed requires retention policy {ref.name}@{ref.version}")
 
 
+def _name(ref: OrganRef) -> str:
+    return f"{ref.id}@{ref.version}"
+
+
+class BodyChannel:
+    """The capability to deliver Observations as exactly one Body channel (ORG-6).
+
+    Only Kernel.body_channel makes one. Its channel is fixed when it is made,
+    and nothing passed to `receive` can change it.
+    """
+
+    def __init__(self, kernel: Kernel, channel: OrganRef, *, key: object) -> None:
+        if key is not _PORT_KEY:
+            raise PermissionError("ORG-6: only the kernel makes ports")
+        self._kernel = kernel
+        self._channel = channel
+
+    @property
+    def channel(self) -> OrganRef:
+        return self._channel
+
+    def receive(self, content: Json, identifiers: Sequence[str] = ()) -> str:
+        """Deliver an Observation. It stays transient until CONSOLIDATE."""
+        return self._kernel._receive(self._channel, content, identifiers)
+
+
+class OrganPort:
+    """The capability to propose as exactly one Mind organ (ORG-6).
+
+    Only Kernel.organ makes one. Every proposal made through it names its
+    organ; the organ never names itself.
+    """
+
+    def __init__(self, kernel: Kernel, organ: OrganRef, *, key: object) -> None:
+        if key is not _PORT_KEY:
+            raise PermissionError("ORG-6: only the kernel makes ports")
+        self._kernel = kernel
+        self._organ = organ
+
+    @property
+    def organ(self) -> OrganRef:
+        return self._organ
+
+    @property
+    def heart(self) -> HeartView:
+        return self._kernel.heart
+
+    def propose(self, *operations: ProposedOperation, reason: str = "") -> Accepted | Rejection:
+        return self._kernel._propose(Proposal(self._organ, operations, reason))
+
+
 class Kernel:
-    """Create with Kernel.create or Kernel.open, never directly."""
+    """Create with Kernel.create or Kernel.open, never directly.
+
+    The Kernel belongs to the host that wires organs together. Organs hold
+    only the ports the host gives them.
+    """
 
     def __init__(
         self, store: Store, path: Path, manifest: Manifest, policy: RetentionPolicy | None
@@ -108,12 +169,25 @@ class Kernel:
     ) -> None:
         self.close()
 
-    def receive(
-        self, channel: OrganRef, content: Json, identifiers: Sequence[str] = ()
-    ) -> str:
-        """A Body channel delivers an Observation. It stays transient until CONSOLIDATE."""
+    # Wiring: the host hands each port to the one organ it belongs to.
+
+    def body_channel(self, channel: OrganRef) -> BodyChannel:
+        if channel in self._manifest.organs:
+            raise KernelError(f"ORG-6: {_name(channel)} is a Mind organ, not a Body channel")
         if channel not in self._manifest.channels:
-            raise KernelError(f"ORG-2: channel {channel.id}@{channel.version} is not registered")
+            raise KernelError(f"ORG-2: channel {_name(channel)} is not registered")
+        return BodyChannel(self, channel, key=_PORT_KEY)
+
+    def organ(self, organ: OrganRef) -> OrganPort:
+        if organ in self._manifest.channels:
+            raise KernelError(f"ORG-6: {_name(organ)} is a Body channel; it cannot propose")
+        if organ not in self._manifest.organs:
+            raise KernelError(f"ORG-2: organ {_name(organ)} is not registered")
+        return OrganPort(self, organ, key=_PORT_KEY)
+
+    # Called only by ports, which supply the identity.
+
+    def _receive(self, channel: OrganRef, content: Json, identifiers: Sequence[str]) -> str:
         if isinstance(identifiers, str):
             raise CanonicalError("identifiers must be a list of strings, not one string")
         names = tuple(identifiers)
@@ -128,7 +202,7 @@ class Kernel:
         self._transient[observation.id] = observation
         return observation.id
 
-    def propose(self, proposal: Proposal) -> Accepted | Rejection:
+    def _propose(self, proposal: Proposal) -> Accepted | Rejection:
         seq = self._store.allocate_seq()
         result = self._validator.validate(proposal, seq, self._store, self._transient)
         if isinstance(result, Rejection):

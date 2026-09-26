@@ -1,7 +1,7 @@
 # Foundation Validator v1: Design
 
 > **Status:** Approved with corrections, 2026-09-26.
-> **Implements:** a subset of [FOUNDATIONS.md](../../../FOUNDATIONS.md) draft 0.4.
+> **Implements:** a subset of [FOUNDATIONS.md](../../../FOUNDATIONS.md) draft 0.5.
 > **Experiment:** E000.
 
 ## 1. Goal
@@ -74,7 +74,7 @@ src/entelechy/foundation/
     validator.py    rule checks: Proposal → AcceptedTransition | Rejection
     replay.py       ReplayCurrent, ReplayHistorical and the Heart digest
     seed.py         seed specification and origin creation
-    kernel.py       the facade organs use; owns the store privately
+    kernel.py       the kernel and the ports organs act through; owns the store privately
 tests/
 ```
 
@@ -158,7 +158,7 @@ Origin is not a transition. Lineage starts at `seq` 1.
 
 A proposal contains:
 
-- `organ`: the proposing organ's id and version,
+- `organ`: the proposing organ's id and version, filled in by the organ's port, never by the organ (ORG-6),
 - `operations`: an ordered list, applied atomically as one transition (PER-9),
 - `reason`: the proposer's own free-text account, recorded but never trusted.
 
@@ -215,19 +215,25 @@ REJECTED
 
 Any exception rolls back the whole transaction (PER-5).
 
-### 6.4 Kernel API
+### 6.4 Kernel API and Ports
 
-This is the only surface an organ touches.
+The host that wires Entelechy together holds the Kernel. Organs never do: each organ holds only the port the host gives it. Identity comes from which port delivered something, never from data the organ supplies (FOUNDATIONS ORG-6).
 
 ```text
-Kernel.create(path, seed_spec) → Kernel
+Kernel.create(path, seed_spec, policies) → Kernel
 Kernel.open(path, policies)    → Kernel        runs ReplayCurrent; refuses to open on mismatch
-kernel.receive(channel, content, identifiers) → ObservationRef
-kernel.propose(proposal)       → Accepted(seq, events) | Rejection
+kernel.body_channel(channel)   → BodyChannel   for one registered Body channel
+kernel.organ(organ)            → OrganPort     for one registered Mind organ
 kernel.heart                   → read-only HeartView
 kernel.replay_current()        → HeartDigest
 kernel.replay_historical(seq)  → HeartView
+
+body_channel.receive(content, identifiers) → ObservationRef
+organ_port.propose(*operations, reason)    → Accepted(seq, events, created) | Rejection
+organ_port.heart                           → read-only HeartView
 ```
+
+A Mind organ therefore has no way to deliver an Observation, and no way to propose under another organ's name. Asking for a Body channel port for a Mind organ, or an organ port for a Body channel, is refused under ORG-6. Asking for a port for anything unregistered is refused under ORG-2.
 
 `Kernel.open` replays the whole lineage and compares it with the materialized Heart before accepting any proposal. In v1 lineage is tiny, and this wake-up check is the most direct test of Law 7.
 
@@ -242,7 +248,7 @@ kernel.replay_historical(seq)  → HeartView
 | Replay | RPL-1 to RPL-4 | Shared `apply`, digest-addressed content, content-deletion trigger, `CONTENT_FORGOTTEN` stubs in historical replay. |
 | Identity | OMG-1, OMG-2, OMG-5 | Immutable `origin`, append-only lineage, wake-up replay. |
 | Provenance | PRV-1 to PRV-7 | Every object version has provenance. Inputs must be persistent. `origin` is only assigned by `create`. No operation changes provenance. |
-| Organs | ORG-1, ORG-2 | The proposing organ must be registered in the manifest at the stated version. |
+| Organs | ORG-1, ORG-2, ORG-6 | Ports exist only for registered organs and channels, each bound to one identity. The validator also checks that the proposing organ is registered. |
 | Objects | OBJ-1 to OBJ-4 | Shared header. `ReviseInfon` diffs the proposed body against the current one. |
 | Referents | REF-1 to REF-3 | Each participant is an object id, an Observation region, or an opaque identifier listed in a persisted Observation's `identifiers`. |
 | Observations | OBS-1, OBS-3 | No operation edits an Observation. `received_seq` is assigned at receipt. OBS-2 is satisfied by the stricter V1-CERTAINTY. |
@@ -378,4 +384,5 @@ These gaps were found while designing and are resolved in FOUNDATIONS 0.4:
 
 ## 12. Recorded, Not Blocking
 
+- **Secure forgetting (OPEN-16).** `FORGET` in v1 is logical forgetting (MEM-6). Retained digests let someone confirm a guess, so low-entropy forgotten content can still be recovered by guessing. Secure erasure would cost content addressing and deduplication, and is deferred.
 - **Implementation identity (OPEN-15).** v1 identifies organs and retention policies by name and version only. A label does not prove that tomorrow's code called version 1 is the same code. A later version should identify executable components by artifact digest, $\langle name,\ version,\ digest \rangle$.

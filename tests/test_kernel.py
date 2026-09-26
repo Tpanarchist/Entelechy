@@ -1,4 +1,4 @@
-"""E000: the first lawful Heart, end to end through the kernel."""
+"""E000: the first lawful Heart, end to end through the kernel and its ports."""
 
 import sqlite3
 from collections.abc import Callable
@@ -10,7 +10,7 @@ import pytest
 from harness import EYE, MIND, FixedRetention, infon_from, plain_seed, policy_seed, tamper
 
 from entelechy.foundation.canonical import CanonicalError, Json
-from entelechy.foundation.kernel import Accepted, Kernel, KernelError
+from entelechy.foundation.kernel import Accepted, BodyChannel, Kernel, KernelError, OrganPort
 from entelechy.foundation.replay import IntegrityError
 from entelechy.foundation.store import StoreError
 from entelechy.foundation.types import (
@@ -21,7 +21,7 @@ from entelechy.foundation.types import (
     OrganRef,
     OtherOperation,
     Polarity,
-    Proposal,
+    ProposedOperation,
     ReviseInfon,
 )
 from entelechy.foundation.validator import CERTAINTY, UNIMPLEMENTED, Rejection
@@ -38,10 +38,8 @@ def refused(result: Accepted | Rejection) -> Rejection:
 
 
 def first_lifecycle(kernel: Kernel, content: Json = "red") -> tuple[str, str]:
-    observation = kernel.receive(EYE, content)
-    result = ok(
-        kernel.propose(Proposal(MIND, (Consolidate(observation), infon_from(observation))))
-    )
+    observation = kernel.body_channel(EYE).receive(content)
+    result = ok(kernel.organ(MIND).propose(Consolidate(observation), infon_from(observation)))
     (infon_id,) = [object_id for object_id in result.created if object_id != observation]
     return observation, infon_id
 
@@ -74,60 +72,115 @@ def test_e000_a_lawful_heart_survives_restart(tmp_path: Path) -> None:
 def test_e000_the_two_step_lifecycle_under_a_retention_policy(tmp_path: Path) -> None:
     path = tmp_path / "heart.db"
     with Kernel.create(path, policy_seed(), [FixedRetention()]) as kernel:
-        observation = kernel.receive(EYE, "red")
-        ok(kernel.propose(Proposal(MIND, (Consolidate(observation),))))
-        ok(kernel.propose(Proposal(MIND, (infon_from(observation),))))
+        mind = kernel.organ(MIND)
+        observation = kernel.body_channel(EYE).receive("red")
+        ok(mind.propose(Consolidate(observation)))
+        ok(mind.propose(infon_from(observation)))
     Kernel.open(path, [FixedRetention()]).close()
 
 
-type Build = Callable[[Kernel, str, str, str], Proposal]
+# ORG-6: authority-bearing identity comes from capability, not payload.
 
 
-def cite_transient(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(MIND, (infon_from(fresh),))
+def test_a_body_channel_delivers_only_as_its_own_channel_org6(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        eye = kernel.body_channel(EYE)
+        assert eye.channel == EYE
+        observation = eye.receive("red")
+        ok(kernel.organ(MIND).propose(Consolidate(observation), infon_from(observation)))
+        body = kernel.heart.body(observation)
+        assert isinstance(body, dict) and body["channel"] == EYE.to_canonical()
 
 
-def negative_infon(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    negative = replace(infon_from(fresh), polarity=Polarity.NEGATIVE)
-    return Proposal(MIND, (Consolidate(fresh), negative))
+def test_an_organ_port_proposes_only_as_its_own_organ_org6(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        mind = kernel.organ(MIND)
+        assert mind.organ == MIND
+        assert mind.heart.digest() == kernel.heart.digest()
+        assert not hasattr(mind, "receive")
 
 
-def certain(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(MIND, (Consolidate(fresh), infon_from(fresh, confidence=Decimal(1))))
+def test_the_kernel_takes_no_identity_as_data_org6(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        assert not hasattr(kernel, "receive")
+        assert not hasattr(kernel, "propose")
 
 
-def impossible(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(MIND, (Consolidate(fresh), infon_from(fresh, confidence=Decimal(0))))
+def test_a_mind_organ_cannot_act_as_a_body_channel_org6(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(KernelError, match="ORG-6"):
+            kernel.body_channel(MIND)
 
 
-def unknown_relation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(MIND, (Consolidate(fresh), infon_from(fresh, relation="Color")))
+def test_a_body_channel_cannot_act_as_a_mind_organ_org6(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(KernelError, match="ORG-6"):
+            kernel.organ(EYE)
 
 
-def stranger(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(OrganRef("llm", "4"), (Consolidate(fresh), infon_from(fresh)))
+def test_ports_are_made_only_by_the_kernel_org6(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(PermissionError, match="ORG-6"):
+            BodyChannel(kernel, EYE, key=object())
+        with pytest.raises(PermissionError, match="ORG-6"):
+            OrganPort(kernel, MIND, key=object())
 
 
-def forget_without_policy(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(MIND, (Forget(observation, 1, "compressing"),))
+def test_an_unregistered_channel_gets_no_port_org2(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(KernelError, match="ORG-2"):
+            kernel.body_channel(OrganRef("ear", "1"))
 
 
-def forget_the_self(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(MIND, (Forget(f"self:{kernel.omega_id}", 1, "who am I"),))
+def test_an_unregistered_organ_gets_no_port_org2(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(KernelError, match="ORG-2"):
+            kernel.organ(OrganRef("llm", "4"))
 
 
-def edit_observation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    revise = ReviseInfon(observation, 1, body_of(kernel, infon_id), (fresh,))
-    return Proposal(MIND, (Consolidate(fresh), revise))
+type Ops = tuple[ProposedOperation, ...]
+type Build = Callable[[Kernel, str, str, str], Ops]
 
 
-def change_relation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
+def cite_transient(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (infon_from(fresh),)
+
+
+def negative_infon(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (Consolidate(fresh), replace(infon_from(fresh), polarity=Polarity.NEGATIVE))
+
+
+def certain(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (Consolidate(fresh), infon_from(fresh, confidence=Decimal(1)))
+
+
+def impossible(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (Consolidate(fresh), infon_from(fresh, confidence=Decimal(0)))
+
+
+def unknown_relation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (Consolidate(fresh), infon_from(fresh, relation="Color"))
+
+
+def forget_without_policy(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (Forget(observation, 1, "compressing"),)
+
+
+def forget_the_self(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (Forget(f"self:{kernel.omega_id}", 1, "who am I"),)
+
+
+def edit_observation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (Consolidate(fresh), ReviseInfon(observation, 1, body_of(kernel, infon_id), (fresh,)))
+
+
+def change_relation(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
     body = replace(body_of(kernel, infon_id), relation="R2")
-    return Proposal(MIND, (Consolidate(fresh), ReviseInfon(infon_id, 1, body, (fresh,))))
+    return (Consolidate(fresh), ReviseInfon(infon_id, 1, body, (fresh,)))
 
 
-def unbuilt(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Proposal:
-    return Proposal(MIND, (OtherOperation("PROPOSE_MODEL"),))
+def unbuilt(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Ops:
+    return (OtherOperation("PROPOSE_MODEL"),)
 
 
 @pytest.mark.parametrize(
@@ -138,7 +191,6 @@ def unbuilt(kernel: Kernel, observation: str, infon_id: str, fresh: str) -> Prop
         (certain, CERTAINTY),
         (impossible, CERTAINTY),
         (unknown_relation, "INF-1"),
-        (stranger, "ORG-2"),
         (forget_without_policy, "MEM-2"),
         (forget_the_self, "MEM-4"),
         (edit_observation, "OBS-1"),
@@ -152,9 +204,10 @@ def test_illegal_proposals_are_rejected_and_change_nothing(
 ) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         observation, infon_id = first_lifecycle(kernel)
-        fresh = kernel.receive(EYE, "blue")
+        fresh = kernel.body_channel(EYE).receive("blue")
         before = kernel.heart.digest()
-        result = refused(kernel.propose(build(kernel, observation, infon_id, fresh)))
+        operations = build(kernel, observation, infon_id, fresh)
+        result = refused(kernel.organ(MIND).propose(*operations))
         assert rule in result.rules
         assert kernel.heart.digest() == before
 
@@ -193,17 +246,11 @@ def test_wake_up_refuses_a_heart_whose_guards_were_dropped(tmp_path: Path) -> No
         Kernel.open(path)
 
 
-def test_an_unregistered_channel_cannot_deliver_org2(tmp_path: Path) -> None:
-    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
-        with pytest.raises(KernelError, match="ORG-2"):
-            kernel.receive(OrganRef("ear", "1"), "noise")
-
-
 def test_non_canonical_content_is_refused_before_it_uses_a_seq(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         weight: object = {"weight": 0.5}
         with pytest.raises(CanonicalError, match="floats"):
-            kernel.receive(EYE, weight)  # type: ignore[arg-type]
+            kernel.body_channel(EYE).receive(weight)  # type: ignore[arg-type]
         first_lifecycle(kernel)
         assert kernel.heart.events()[-1].seq == 2
 
@@ -211,9 +258,9 @@ def test_non_canonical_content_is_refused_before_it_uses_a_seq(tmp_path: Path) -
 def test_the_kernel_keeps_what_was_received_not_the_callers_buffer_obs1(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         buffer: dict[str, Json] = {"reading": 1}
-        observation = kernel.receive(EYE, buffer)
+        observation = kernel.body_channel(EYE).receive(buffer)
         buffer["reading"] = 2
-        ok(kernel.propose(Proposal(MIND, (Consolidate(observation), infon_from(observation)))))
+        ok(kernel.organ(MIND).propose(Consolidate(observation), infon_from(observation)))
         body = kernel.heart.body(observation)
         assert isinstance(body, dict) and body["content"] == {"reading": 1}
 
@@ -221,20 +268,20 @@ def test_the_kernel_keeps_what_was_received_not_the_callers_buffer_obs1(tmp_path
 def test_identifiers_must_be_a_list_not_one_string(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         with pytest.raises(CanonicalError, match="identifiers"):
-            kernel.receive(EYE, "red", "abc")
+            kernel.body_channel(EYE).receive("red", "abc")
 
 
 def test_identifiers_must_be_strings(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         numbers: object = [7]
         with pytest.raises(CanonicalError, match="identifiers"):
-            kernel.receive(EYE, "red", numbers)  # type: ignore[arg-type]
+            kernel.body_channel(EYE).receive("red", numbers)  # type: ignore[arg-type]
 
 
 def test_an_integer_too_large_to_encode_is_refused_before_it_uses_a_seq(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         with pytest.raises(CanonicalError):
-            kernel.receive(EYE, 10**5000)
+            kernel.body_channel(EYE).receive(10**5000)
         first_lifecycle(kernel)
         assert kernel.heart.events()[-1].seq == 2
 
@@ -250,17 +297,17 @@ def test_historical_views_cannot_write_the_heart_law5(tmp_path: Path) -> None:
 def test_an_unknown_observation_id_is_rejected_not_raised(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         typo = "obs:not-a-real-id"
-        result = refused(kernel.propose(Proposal(MIND, (Consolidate(typo), infon_from(typo)))))
+        result = refused(kernel.organ(MIND).propose(Consolidate(typo), infon_from(typo)))
         assert result.rules == {"PER-3"}
 
 
 def test_transient_observations_do_not_survive_restart_per4(tmp_path: Path) -> None:
     path = tmp_path / "heart.db"
     with Kernel.create(path, plain_seed()) as kernel:
-        observation = kernel.receive(EYE, "red")
+        observation = kernel.body_channel(EYE).receive("red")
     with Kernel.open(path) as reopened:
-        proposal = Proposal(MIND, (Consolidate(observation), infon_from(observation)))
-        assert refused(reopened.propose(proposal)).rules == {"PER-3"}
+        result = reopened.organ(MIND).propose(Consolidate(observation), infon_from(observation))
+        assert refused(result).rules == {"PER-3"}
 
 
 def test_seq_is_never_reused_across_rejection_and_restart_seq2(tmp_path: Path) -> None:
@@ -268,7 +315,7 @@ def test_seq_is_never_reused_across_rejection_and_restart_seq2(tmp_path: Path) -
     with Kernel.create(path, plain_seed()) as kernel:
         first_lifecycle(kernel)
         first = kernel.heart.events()[-1].seq
-        refused(kernel.propose(Proposal(MIND, ())))
+        refused(kernel.organ(MIND).propose())
     with Kernel.open(path) as reopened:
         first_lifecycle(reopened)
         latest = reopened.heart.events()[-1].seq
