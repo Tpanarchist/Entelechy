@@ -51,6 +51,7 @@ from entelechy.foundation.types import (
 
 UNIMPLEMENTED = "V1-UNIMPLEMENTED"
 CERTAINTY = "V1-CERTAINTY"
+REVISE_REQUIRES = "§10 REVISE_INFON"
 
 _CAPABILITY = object()
 
@@ -236,7 +237,7 @@ class Validator:
             case FormInfon():
                 return self._form_infon(index, operation, proposal, work)
             case ReviseInfon():
-                return [Violation(UNIMPLEMENTED, "REVISE_INFON is not built yet")]
+                return self._revise_infon(index, operation, proposal, work)
             case Forget():
                 return [Violation(UNIMPLEMENTED, "FORGET is not built yet")]
             case OtherOperation():
@@ -446,6 +447,112 @@ class Validator:
                         )
                     ]
                 return []
+
+    # REVISE_INFON
+
+    def _revise_infon(
+        self, index: int, op: ReviseInfon, proposal: Proposal, work: _Work
+    ) -> list[Violation]:
+        header = work.latest(op.infon_id)
+        if header is None:
+            return [_missing("PER-6", "Infon", op.infon_id, work)]
+        if header.type is ObjectType.OBSERVATION:
+            return [Violation("OBS-1", "Observations are never edited; revise the Infons instead")]
+        if header.type is not ObjectType.INFON:
+            return [Violation("TRN-1", f"REVISE_INFON applies only to Infons, not {header.type}")]
+        if header.forgotten:
+            return [Violation("MEM-3", f"the content of {op.infon_id} is forgotten")]
+        if header.retired_by is not None:
+            return [Violation("OBJ-3", f"{op.infon_id} is retired; retired objects are final")]
+        if op.expected_version != header.version:
+            return [
+                Violation(
+                    "PER-6",
+                    "the proposal revises a stale version",
+                    {"expected": op.expected_version, "current": header.version},
+                )
+            ]
+        data = work.content(header.body_digest)
+        if data is None:
+            return [Violation("MEM-3", f"the content of {op.infon_id} is missing")]
+        current = InfonBody.from_canonical(parse(data))
+
+        violations: list[Violation] = []
+        content_changes = [
+            name
+            for name in ("relation", "participants", "polarity", "context")
+            if getattr(op.body, name) != getattr(current, name)
+        ]
+        trust_changes = [
+            name for name in ("confidence", "status") if getattr(op.body, name) != getattr(current, name)
+        ]
+        if content_changes:
+            violations.append(
+                Violation(
+                    "INF-4",
+                    "REVISE_INFON changes only confidence and status",
+                    {"changed": content_changes},
+                )
+            )
+            violations.append(
+                Violation("OBJ-4", "a content change creates a successor: use FORM_INFON")
+            )
+        elif not trust_changes:
+            violations.append(Violation("INF-4", "the revision changes nothing"))
+        violations += _certainty(op.body.confidence)
+
+        # New evidence is judged per version: a newer version of something
+        # already cited is itself new evidence.
+        evidence, evidence_violations = _resolve_inputs(op.evidence, work)
+        violations += evidence_violations
+        prior_provenance = work.provenance_of(header.provenance_id)
+        prior_inputs = set() if prior_provenance is None else set(prior_provenance.inputs)
+        new_evidence = [ref for ref in evidence if ref not in prior_inputs]
+        if not op.evidence:
+            violations.append(Violation(REVISE_REQUIRES, "REVISE_INFON requires evidence"))
+        elif any(ref.id == header.id for ref in evidence):
+            violations.append(
+                Violation(REVISE_REQUIRES, "an Infon cannot be evidence for its own revision")
+            )
+        elif not evidence_violations and not new_evidence:
+            violations.append(
+                Violation(REVISE_REQUIRES, "the evidence must include an input not already cited")
+            )
+        if violations:
+            return violations
+
+        # The revised commitment derives from the version it revises and the
+        # new evidence, so both are provenance inputs.
+        body = canonical_bytes(op.body.to_canonical())
+        provenance = Provenance(
+            id=self._new_id("prov"),
+            kind=ProvenanceKind.DERIVATION,
+            inputs=(header.ref(), *evidence),
+            operation=Operation.REVISE_INFON,
+            organ=proposal.organ,
+            seed_spec=None,
+            seq=work.seq,
+        )
+        revised = replace(
+            header,
+            version=header.version + 1,
+            provenance_id=provenance.id,
+            seq=work.seq,
+            retired_by=work.seq if op.body.status is InfonStatus.RETIRED else None,
+            body_digest=digest(body),
+        )
+        work.prior.append(header.ref())
+        work.stage(revised, provenance, body)
+        work.operations.append(OperationEntry(Operation.REVISE_INFON, header.id))
+        work.checks += [
+            Check(index, "INF-4", {"changed": trust_changes}),
+            Check(
+                index, REVISE_REQUIRES, {"new_evidence": [ref.to_canonical() for ref in new_evidence]}
+            ),
+            Check(index, CERTAINTY, {"open_interval": True}),
+        ]
+        work.emit(EventType.INFON_REVISED, header.id)
+        return []
 
     # Everything else
 
