@@ -84,6 +84,27 @@ def test_open_refuses_a_file_that_is_not_a_heart(tmp_path: Path) -> None:
         Store.open(path)
 
 
+def test_open_leaves_a_foreign_sqlite_database_untouched(tmp_path: Path) -> None:
+    path = tmp_path / "other.db"
+    other = sqlite3.connect(path)
+    other.execute("CREATE TABLE notes (text TEXT)")
+    other.commit()
+    other.close()
+    before = path.read_bytes()
+    with pytest.raises(StoreError, match="not an Entelechy Heart"):
+        Store.open(path)
+    assert path.read_bytes() == before
+    assert not (tmp_path / "other.db-wal").exists()
+
+
+def test_open_leaves_an_empty_file_empty(tmp_path: Path) -> None:
+    path = tmp_path / "empty.db"
+    path.write_bytes(b"")
+    with pytest.raises(StoreError, match="not an Entelechy Heart"):
+        Store.open(path)
+    assert path.read_bytes() == b""
+
+
 def test_open_refuses_a_heart_without_origin(path: Path) -> None:
     Store.create(path).close()
     with pytest.raises(StoreError, match="origin is missing"):

@@ -20,6 +20,7 @@ type Canonical = None | bool | int | str | Sequence[Canonical] | Mapping[str, Ca
 type Json = None | bool | int | str | list[Json] | dict[str, Json]
 
 DIGEST_ALGORITHM = "sha256"
+MAX_DECIMAL_TEXT = 100
 
 
 class CanonicalError(ValueError):
@@ -27,12 +28,29 @@ class CanonicalError(ValueError):
 
 
 def decimal_text(value: Decimal) -> str:
-    """Normalized fixed-point text for typed schemas: Decimal("0.80") -> "0.8"."""
+    """Exact, normalized fixed-point text for typed schemas: Decimal("0.80") -> "0.8".
+
+    Built from the digits themselves, so it never rounds and does not depend
+    on the ambient decimal context.
+    """
     if not value.is_finite():
         raise CanonicalError(f"non-finite decimal {value}")
-    if value.is_zero():
+    sign, digit_tuple, exponent = value.as_tuple()
+    assert isinstance(exponent, int)
+    digits = "".join(map(str, digit_tuple)).lstrip("0")
+    if not digits:
         return "0"
-    return format(value.normalize(), "f")
+    significant = digits.rstrip("0")
+    exponent += len(digits) - len(significant)
+    if len(significant) + abs(exponent) + 2 > MAX_DECIMAL_TEXT:
+        raise CanonicalError(f"decimal {value} is too long for canonical text")
+    if exponent >= 0:
+        text = significant + "0" * exponent
+    elif -exponent < len(significant):
+        text = f"{significant[:exponent]}.{significant[exponent:]}"
+    else:
+        text = "0." + "0" * (-exponent - len(significant)) + significant
+    return f"-{text}" if sign else text
 
 
 def _prepare(value: object) -> Json:
@@ -60,13 +78,17 @@ def _prepare(value: object) -> Json:
 
 def canonical_bytes(value: Canonical) -> bytes:
     """The one byte representation of `value`: sorted keys, no whitespace, UTF-8."""
-    text = json.dumps(
-        _prepare(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
+    prepared = _prepare(value)
+    try:
+        text = json.dumps(
+            prepared,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except ValueError as error:
+        raise CanonicalError(f"no canonical form: {error}") from error
     try:
         return text.encode("utf-8")
     except UnicodeEncodeError as error:
@@ -104,7 +126,9 @@ def parse(data: bytes) -> Json:
         value: Json = json.loads(
             text, parse_float=_reject_float, parse_constant=_reject_constant
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except CanonicalError:
+        raise
+    except (UnicodeDecodeError, ValueError) as error:
         raise CanonicalError(f"not canonical JSON: {error}") from error
     if canonical_bytes(value) != data:
         raise CanonicalError("bytes are not in canonical form")

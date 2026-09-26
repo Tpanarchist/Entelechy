@@ -4,10 +4,13 @@ from decimal import Decimal
 import pytest
 from harness import EYE, MIND, Harness, accepted, infon_from, rejected
 
+from entelechy.foundation.canonical import parse
 from entelechy.foundation.types import (
     Consolidate,
     EventType,
     FormInfon,
+    InfonBody,
+    ObjectType,
     ObjectReferent,
     OpaqueReferent,
     OrganRef,
@@ -121,6 +124,23 @@ def test_certainty_is_out_of_reach_in_v1(heart: Harness, confidence: str) -> Non
     observation = heart.receive()
     infon = infon_from(observation, confidence=Decimal(confidence))
     assert rejected(heart.propose(Consolidate(observation), infon)).rules == {CERTAINTY}
+
+
+def test_near_certainty_is_stored_exactly_not_rounded_to_one(heart: Harness) -> None:
+    observation = heart.receive()
+    nines = Decimal("0." + "9" * 29)
+    result = accepted(
+        heart.propose(Consolidate(observation), infon_from(observation, confidence=nines))
+    )
+    (infon,) = [header for header in result.versions if header.type is ObjectType.INFON]
+    stored = InfonBody.from_canonical(parse(result.bodies[infon.body_digest]))
+    assert stored.confidence == nines
+
+
+def test_a_confidence_without_canonical_form_is_rejected_not_raised_inf1(heart: Harness) -> None:
+    observation = heart.receive()
+    infon = infon_from(observation, confidence=Decimal("1E-1000030"))
+    assert rejected(heart.propose(Consolidate(observation), infon)).rules == {"INF-1"}
 
 
 def test_a_relation_outside_the_vocabulary_is_rejected_inf1(heart: Harness) -> None:

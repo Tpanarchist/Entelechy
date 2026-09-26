@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 
-from entelechy.foundation.canonical import Json, canonical_bytes, digest
+from entelechy.foundation.canonical import CanonicalError, Json, canonical_bytes, digest, parse
 from entelechy.foundation.replay import HeartView, replay_current, replay_historical
 from entelechy.foundation.seed import Manifest, PolicyRef, SeedSpec, manifest_for, seed_heart
 from entelechy.foundation.store import Store
@@ -114,10 +114,17 @@ class Kernel:
         """A Body channel delivers an Observation. It stays transient until CONSOLIDATE."""
         if channel not in self._manifest.channels:
             raise KernelError(f"ORG-2: channel {channel.id}@{channel.version} is not registered")
-        observation = Observation(f"obs:{uuid.uuid4()}", channel, 0, content, tuple(identifiers))
-        canonical_bytes(observation.body())  # refuse non-canonical content before using a seq
+        if isinstance(identifiers, str):
+            raise CanonicalError("identifiers must be a list of strings, not one string")
+        names = tuple(identifiers)
+        if not all(isinstance(name, str) for name in names):
+            raise CanonicalError("identifiers must all be strings")
+        # Keep a canonical snapshot, not the caller's object: a channel that
+        # reuses its buffer must not rewrite what was received (OBS-1). This
+        # also refuses non-canonical content before a seq is used.
+        snapshot = parse(canonical_bytes(content))
         seq = self._store.allocate_seq()
-        observation = Observation(observation.id, channel, seq, content, tuple(identifiers))
+        observation = Observation(f"obs:{uuid.uuid4()}", channel, seq, snapshot, names)
         self._transient[observation.id] = observation
         return observation.id
 
@@ -143,4 +150,5 @@ class Kernel:
         return replay_current(self._store)
 
     def replay_historical(self, seq: int) -> HeartView:
-        return replay_historical(self._store, seq)
+        # The view reads content through the read-only connection, like kernel.heart.
+        return replay_historical(self._store, seq, content=self._reader)

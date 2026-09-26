@@ -137,10 +137,15 @@ class HeartView:
         return heart_digest(self._structure)
 
 
-def replay_historical(store: Store, seq: int) -> HeartView:
-    """The Heart as it stood at `seq` (RPL-4). Later-forgotten content is a stub."""
+def replay_historical(store: Store, seq: int, content: Store | None = None) -> HeartView:
+    """The Heart as it stood at `seq` (RPL-4). Later-forgotten content is a stub.
+
+    `content` is where the view reads live bytes from; it defaults to `store`.
+    """
     if seq < 0:
         raise ValueError("seq must not be negative")
     fresh = rebuild(store, up_to=seq)
     forgotten_now = {header.id for header in store.versions() if header.forgotten}
-    return HeartView(fresh, content=store, forgotten_later=forgotten_now)
+    return HeartView(
+        fresh, content=store if content is None else content, forgotten_later=forgotten_now
+    )

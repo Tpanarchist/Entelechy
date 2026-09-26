@@ -71,6 +71,8 @@ class RetentionPolicy(Protocol):
 class HeartReader(Protocol):
     def latest(self, object_id: str) -> ObjectHeader | None: ...
 
+    def versions(self, object_id: str | None = None) -> list[ObjectHeader]: ...
+
     def content(self, body_digest: str) -> bytes | None: ...
 
     def provenance(self, provenance_id: str) -> Provenance | None: ...
@@ -143,6 +145,10 @@ class _Work:
     def latest(self, object_id: str) -> ObjectHeader | None:
         staged = self._latest.get(object_id)
         return staged if staged is not None else self.heart.latest(object_id)
+
+    def versions_of(self, object_id: str) -> list[ObjectHeader]:
+        staged = [header for header in self.versions if header.id == object_id]
+        return self.heart.versions(object_id) + staged
 
     def content(self, body_digest: str) -> bytes | None:
         staged = self.bodies.get(body_digest)
@@ -477,15 +483,26 @@ class Validator:
             return [Violation("MEM-3", f"the content of {op.infon_id} is missing")]
         current = InfonBody.from_canonical(parse(data))
 
+        # A confidence that fails V1-CERTAINTY cannot be encoded or compared,
+        # so nothing else about the proposed body can be judged.
+        certainty = _certainty(op.body.confidence)
+        if certainty:
+            return certainty
+        try:
+            proposed = _field_bytes(op.body)
+        except CanonicalError as error:
+            return [Violation("INF-1", f"the revised body has no canonical form: {error}")]
+        existing = _field_bytes(current)
+
+        # Compare canonical encodings, never Python equality: 1 == True and
+        # 1 == 1.0 in Python, but they are different content.
         violations: list[Violation] = []
         content_changes = [
             name
             for name in ("relation", "participants", "polarity", "context")
-            if getattr(op.body, name) != getattr(current, name)
+            if proposed[name] != existing[name]
         ]
-        trust_changes = [
-            name for name in ("confidence", "status") if getattr(op.body, name) != getattr(current, name)
-        ]
+        trust_changes = [name for name in ("confidence", "status") if proposed[name] != existing[name]]
         if content_changes:
             violations.append(
                 Violation(
@@ -499,15 +516,18 @@ class Validator:
             )
         elif not trust_changes:
             violations.append(Violation("INF-4", "the revision changes nothing"))
-        violations += _certainty(op.body.confidence)
 
-        # New evidence is judged per version: a newer version of something
-        # already cited is itself new evidence.
+        # Evidence is new only if no version of this Infon has cited it. It is
+        # judged per version: a newer version of something already cited is
+        # itself new evidence.
         evidence, evidence_violations = _resolve_inputs(op.evidence, work)
         violations += evidence_violations
-        prior_provenance = work.provenance_of(header.provenance_id)
-        prior_inputs = set() if prior_provenance is None else set(prior_provenance.inputs)
-        new_evidence = [ref for ref in evidence if ref not in prior_inputs]
+        cited: set[ObjectRef] = set()
+        for version in work.versions_of(header.id):
+            version_provenance = work.provenance_of(version.provenance_id)
+            if version_provenance is not None:
+                cited.update(version_provenance.inputs)
+        new_evidence = [ref for ref in evidence if ref not in cited]
         if not op.evidence:
             violations.append(Violation(REVISE_REQUIRES, "REVISE_INFON requires evidence"))
         elif any(ref.id == header.id for ref in evidence):
@@ -611,15 +631,24 @@ class Validator:
 
 
 def _certainty(confidence: Decimal) -> list[Violation]:
-    if confidence.is_finite() and Decimal(0) < confidence < Decimal(1):
-        return []
-    return [
-        Violation(
-            CERTAINTY,
-            "v1 cannot establish certainty; confidence must be strictly between 0 and 1",
-            {"confidence": str(confidence)},
-        )
-    ]
+    if not (confidence.is_finite() and Decimal(0) < confidence < Decimal(1)):
+        return [
+            Violation(
+                CERTAINTY,
+                "v1 cannot establish certainty; confidence must be strictly between 0 and 1",
+                {"confidence": str(confidence)},
+            )
+        ]
+    # The checked value must be exactly the stored value, so it must encode.
+    try:
+        decimal_text(confidence)
+    except CanonicalError as error:
+        return [Violation("INF-1", f"confidence has no canonical form: {error}")]
+    return []
+
+
+def _field_bytes(body: InfonBody) -> dict[str, bytes]:
+    return {name: canonical_bytes(value) for name, value in body.to_canonical().items()}
 
 
 def _missing(rule: str, role: str, object_id: str, work: _Work) -> Violation:

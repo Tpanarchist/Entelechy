@@ -2,7 +2,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
-from harness import Harness, infon_body, rejected
+from harness import Harness, infon_body, infon_from, rejected
 
 from entelechy.foundation.types import (
     Consolidate,
@@ -12,6 +12,7 @@ from entelechy.foundation.types import (
     ObjectRef,
     ObjectReferent,
     ProvenanceKind,
+    RegionReferent,
     ReviseInfon,
 )
 from entelechy.foundation.validator import CERTAINTY, REVISE_REQUIRES
@@ -174,6 +175,80 @@ def test_the_justification_names_only_what_changed_per7(
     revision_checks = [check for check in result.justification if check.operation == 1]
     assert revision_checks[0].rule == "INF-4"
     assert revision_checks[0].measured == {"changed": ["status"]}
+
+
+def test_evidence_cited_by_any_earlier_version_is_not_new(
+    heart: Harness, formed: tuple[str, str]
+) -> None:
+    observation, infon_id = formed
+    evidence = heart.receive()
+    lowered = replace(infon_body(heart.store, infon_id), confidence=Decimal("0.4"))
+    heart.commit(Consolidate(evidence), ReviseInfon(infon_id, 1, lowered, (evidence,)))
+    # Version 1 already cited the original Observation; citing it again is not new.
+    raised = replace(lowered, confidence=Decimal("0.9"))
+    result = rejected(heart.propose(ReviseInfon(infon_id, 2, raised, (observation,))))
+    assert result.rules == {REVISE_REQUIRES}
+
+
+def test_true_is_different_content_from_one_inf4(heart: Harness) -> None:
+    observation = heart.receive()
+    form = replace(infon_from(observation), context={"scope": 1})
+    result = heart.commit(Consolidate(observation), form)
+    (infon_id,) = [h.id for h in result.versions if h.id != observation]
+    evidence = heart.receive()
+    body = replace(
+        infon_body(heart.store, infon_id), context={"scope": True}, confidence=Decimal("0.6")
+    )
+    outcome = rejected(
+        heart.propose(Consolidate(evidence), ReviseInfon(infon_id, 1, body, (evidence,)))
+    )
+    assert outcome.rules == {"INF-4", "OBJ-4"}
+    assert outcome.violations[0].measured == {"changed": ["context"]}
+
+
+def test_a_region_of_true_is_not_a_region_of_one_inf4(
+    heart: Harness, formed: tuple[str, str]
+) -> None:
+    observation, infon_id = formed
+    evidence = heart.receive()
+    body = replace(
+        infon_body(heart.store, infon_id),
+        participants=(RegionReferent(observation, {"x": True}),),
+        confidence=Decimal("0.6"),
+    )
+    outcome = rejected(
+        heart.propose(Consolidate(evidence), ReviseInfon(infon_id, 1, body, (evidence,)))
+    )
+    assert outcome.violations[0].measured == {"changed": ["participants"]}
+
+
+def test_a_non_canonical_revised_body_is_rejected_not_raised_inf1(
+    heart: Harness, formed: tuple[str, str]
+) -> None:
+    _, infon_id = formed
+    evidence = heart.receive()
+    context: dict[str, object] = {"x": 1.0}
+    body = replace(
+        infon_body(heart.store, infon_id),
+        context=context,  # type: ignore[arg-type]
+        confidence=Decimal("0.6"),
+    )
+    outcome = rejected(
+        heart.propose(Consolidate(evidence), ReviseInfon(infon_id, 1, body, (evidence,)))
+    )
+    assert outcome.rules == {"INF-1"}
+
+
+def test_a_signalling_nan_confidence_is_rejected_not_raised(
+    heart: Harness, formed: tuple[str, str]
+) -> None:
+    _, infon_id = formed
+    evidence = heart.receive()
+    body = replace(infon_body(heart.store, infon_id), confidence=Decimal("sNaN"))
+    outcome = rejected(
+        heart.propose(Consolidate(evidence), ReviseInfon(infon_id, 1, body, (evidence,)))
+    )
+    assert outcome.rules == {CERTAINTY}
 
 
 def test_revised_confidence_obeys_v1_certainty(heart: Harness, formed: tuple[str, str]) -> None:

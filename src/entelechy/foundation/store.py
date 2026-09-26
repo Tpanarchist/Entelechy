@@ -242,8 +242,9 @@ class Store:
 
     @classmethod
     def open(cls, path: Path) -> Store:
-        if not path.is_file():
-            raise StoreError(f"{path} does not exist")
+        # Check through a read-only connection first, so that a file which is
+        # not a Heart is refused without being changed (no WAL switch).
+        cls.open_readonly(path).close()
         try:
             connection = cls._connect(str(path))
         except sqlite3.Error as error:

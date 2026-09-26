@@ -208,6 +208,45 @@ def test_non_canonical_content_is_refused_before_it_uses_a_seq(tmp_path: Path) -
         assert kernel.heart.events()[-1].seq == 2
 
 
+def test_the_kernel_keeps_what_was_received_not_the_callers_buffer_obs1(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        buffer: dict[str, Json] = {"reading": 1}
+        observation = kernel.receive(EYE, buffer)
+        buffer["reading"] = 2
+        ok(kernel.propose(Proposal(MIND, (Consolidate(observation), infon_from(observation)))))
+        body = kernel.heart.body(observation)
+        assert isinstance(body, dict) and body["content"] == {"reading": 1}
+
+
+def test_identifiers_must_be_a_list_not_one_string(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(CanonicalError, match="identifiers"):
+            kernel.receive(EYE, "red", "abc")
+
+
+def test_identifiers_must_be_strings(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        numbers: object = [7]
+        with pytest.raises(CanonicalError, match="identifiers"):
+            kernel.receive(EYE, "red", numbers)  # type: ignore[arg-type]
+
+
+def test_an_integer_too_large_to_encode_is_refused_before_it_uses_a_seq(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        with pytest.raises(CanonicalError):
+            kernel.receive(EYE, 10**5000)
+        first_lifecycle(kernel)
+        assert kernel.heart.events()[-1].seq == 2
+
+
+def test_historical_views_cannot_write_the_heart_law5(tmp_path: Path) -> None:
+    with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
+        first_lifecycle(kernel)
+        view = kernel.replay_historical(1)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            view._content.allocate_seq()
+
+
 def test_an_unknown_observation_id_is_rejected_not_raised(tmp_path: Path) -> None:
     with Kernel.create(tmp_path / "heart.db", plain_seed()) as kernel:
         typo = "obs:not-a-real-id"
