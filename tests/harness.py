@@ -123,6 +123,25 @@ class Harness:
         self.store.close()
 
 
+def tamper(path: Path, guards: tuple[str, ...], statement: str, params: tuple[object, ...] = ()) -> None:
+    """Edit the database file behind the kernel's back, then put the guards back."""
+    raw = sqlite3.connect(path, autocommit=True)
+    try:
+        saved = [
+            raw.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", (name,)
+            ).fetchone()[0]
+            for name in guards
+        ]
+        for name in guards:
+            raw.execute(f"DROP TRIGGER {name}")
+        raw.execute(statement, params)
+        for sql in saved:
+            raw.execute(sql)
+    finally:
+        raw.close()
+
+
 def rejected(result: AcceptedTransition | Rejection) -> Rejection:
     assert isinstance(result, Rejection), f"expected a rejection, got {result}"
     return result
