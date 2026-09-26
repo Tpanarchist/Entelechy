@@ -1,6 +1,6 @@
 # Entelechy Foundations
 
-> **Status:** Draft 0.5, 2026-09-26. Normative. Changes between drafts are listed in §18.
+> **Status:** Draft 0.6, 2026-09-26. Normative. Changes between drafts are listed in §18.
 
 [README.md](README.md) says what Entelechy is. [ARCHITECTURE.md](ARCHITECTURE.md) explains how its parts fit together. This document says what an implementation MUST, MAY and MUST NOT do. It is written so that each rule can become an assertion, a validator check or a test.
 
@@ -87,6 +87,18 @@ Lineage alone cannot reconstruct every byte, and it must not. Entelechy cannot b
 This forgetting is logical, not secure erasure (MEM-6). Lineage keeps each body's digest, and a digest lets someone confirm a guess, so sufficiently low-entropy content can still be recovered by guessing. Secure forgetting is OPEN-16.
 
 If Entelechy holds a belief and we ask why, its developmental path to that belief can be reconstructed transition by transition.
+
+### Law 8: A Mind cannot choose or fabricate the identity of a grounding root
+
+Grounding-root identity MUST be established by an authority-bearing capability or by immutable persisted evidence, never by payload supplied by a Mind. A Mind may cause its own capability-bound testimony source to be admitted; it can never claim to be another source, and it can never invent an ObservationRoot (§8.14).
+
+### Law 9: Support is inherited; independence is not
+
+A derived commitment inherits the grounding roots of its inputs. A new derivation node never creates a new independent source.
+
+$$
+\boxed{\text{New provenance input} \neq \text{new evidence}}
+$$
 
 ### Consequences
 
@@ -209,27 +221,41 @@ DERIVATION D9
 → INFON I51
 ```
 
-### Provenance kinds
+### Production modes
 
-| Kind | Meaning |
+A provenance record's `mode` says how a commitment was produced. It never says what grounds it; that is given by its roots (§8.14).
+
+| Mode | Assigned when |
 | --- | --- |
-| `origin` | Constituted in the seed at creation. |
-| `observation` | Received through a Body channel and persisted by `CONSOLIDATE`. |
-| `testimony` | Asserted by an external agent or source, including content an organ supplies from its own pretraining (ORG-3). |
-| `derivation` | Inferred from other commitments by a named operation. |
-| `simulation` | Produced by running a Model internally. |
-| `experiment` | The outcome of an action chosen to discriminate between Models (§13). |
-| `self-observation` | Observation of Entelechy's own state or cognition. |
+| `origin` | the seed is created |
+| `observation` | an Observation from an exteroceptive Body channel is consolidated |
+| `self-observation` | an Observation from an interoceptive channel is consolidated (INT-2) |
+| `testimony` | an organ forms an Infon from its own knowledge, with no inputs (ORG-3) |
+| `attributed` | an organ forms an Infon whose only inputs are `attribution` inputs (ORG-4) |
+| `derivation` | an organ forms an Infon with at least one `derivation_input` |
+| `revision` | `REVISE_INFON` changes an Infon |
+| `simulation` | reserved: produced by running a Model internally |
+| `experiment` | reserved: the outcome of an action chosen to discriminate between Models (§13) |
 
-A provenance record contains `kind`, `inputs` (references to what it was derived from), `operation`, `organ` (the organ and version that proposed it) and `seq`. For `origin` provenance, `organ` is replaced by `seed_spec`, which identifies the seed specification. There is no seed organ.
+A provenance record contains:
+
+- `mode`,
+- `inputs`: references to what it was derived from, each with a role (ROL-1),
+- `operation`,
+- `organ`,
+- `seq`.
+
+For the modes `observation` and `self-observation`, `organ` names the delivering channel. For every other non-origin mode, it names the proposing organ. For `origin`, `organ` is replaced by `seed_spec`, which identifies the seed specification; there is no seed organ.
 
 - **PRV-1** No epistemic commitment exists without provenance.
 - **PRV-2** Provenance MUST NOT be modified after it is written.
 - **PRV-3** `derivation` and `simulation` provenance MUST reference their inputs. The provenance graph MUST be acyclic, so nothing is its own justification.
 - **PRV-4** Committing an object REQUIRES that every provenance input is itself persistent, at least as a lineage stub. An input MAY be made persistent in the same transition (MEM-1).
-- **PRV-5** `origin` provenance MUST only be assigned at creation. Learned structure MUST NOT be relabelled `origin`.
-- **PRV-6** A provenance kind MUST NOT be upgraded. For example, a simulated result must never be recorded as observed.
-- **PRV-7** For every provenance kind except `origin`, `organ` MUST identify both the organ and its version, so that a conclusion can still be traced to the Mind that proposed it after that Mind is replaced. `origin` provenance MUST identify the seed specification instead.
+- **PRV-5** `origin` mode MUST only be assigned at creation. Learned structure MUST NOT be relabelled `origin`.
+- **PRV-6** A mode MUST NOT be upgraded. For example, a simulated result must never be recorded as observed.
+- **PRV-7** For every mode except `origin`, `organ` MUST identify both the organ or channel and its version, so that a conclusion can still be traced to what delivered or proposed it after that is replaced. For `observation` and `self-observation` it names the delivering channel; otherwise the proposing organ. `origin` provenance MUST identify the seed specification instead.
+- **PRV-8** Every provenance record carries a production mode, assigned by the kernel or the validator from the operation, the port that delivered or proposed it, and the roles of its inputs. No organ supplies a mode.
+- **PRV-9** A mode MUST NOT be read as evidence composition. What grounds a commitment is given by its roots alone (ROT-6).
 
 ---
 
@@ -238,9 +264,9 @@ A provenance record contains `kind`, `inputs` (references to what it was derived
 Organs are the replaceable machinery through which Entelechy perceives, computes and acts. Transformers, state-space models, encoders, symbolic engines, search, simulators, sensors, APIs and Manas are all organs.
 
 - **ORG-1** Organs propose; transitions commit (Law 5).
-- **ORG-2** Every committed object without `origin` provenance MUST name the organ and version that proposed it. Seed structure names the seed specification instead (PRV-7).
-- **ORG-3** Content an organ supplies from its own pretraining, rather than from Entelechy's experience, MUST carry `testimony` provenance naming that organ. This keeps knowledge inherited from a pretrained model distinguishable from knowledge Entelechy learned.
-- **ORG-4** Language is a codec. When someone says $X$, the fact that they said it MAY be committed as an `observation`, but $X$ itself MUST enter as `testimony` attributed to the speaker. It MUST NOT be committed as an observation of the world.
+- **ORG-2** Every committed object without `origin` provenance MUST name what delivered or proposed it, with its version: the delivering channel for an Observation, the proposing organ otherwise. Seed structure names the seed specification instead (PRV-7).
+- **ORG-3** Content an organ supplies from its own knowledge, rather than from Entelechy's experience, is formed with mode `testimony`. Its root is $TestimonyRoot(organ\_id)$ (ROT-3). This keeps knowledge inherited from a pretrained model distinguishable from knowledge Entelechy learned.
+- **ORG-4** Language is a codec. When someone says $X$, the fact that they said it MAY be committed as an `observation`. $X$ itself is formed with mode `attributed`, with the utterance's Observation as an `attribution` input. It creates no root (ROT-4), and it MUST NOT be committed as an observation of the world.
 - **ORG-5** An organ's internal parameters, such as neural weights, are organ state, not Heart state, and MAY change during training. Putting a new organ version into service is a `CHANGE_ORGAN` transition. Its provenance MUST reference the experience the organ was trained on. Existing Models are not affected (MOD-12).
 - **ORG-6**
 
@@ -250,7 +276,7 @@ Organs are the replaceable machinery through which Entelechy perceives, computes
 
   The identity an organ or Body channel acts under MUST be established by the interface it acts through, never by data it supplies. A Body channel delivers Observations only through a port bound to that channel, and a Mind organ proposes only through a port bound to that organ.
 
-  What a port authenticates is identity: which channel delivered an Observation, and which organ proposed a transition. It does not authenticate claims inside the payload. The provenance kind of an Infon, for example, remains a claim attributed to the authenticated organ (ORG-3, ORG-4), not a verified fact. What ORG-6 guarantees is that an organ which is not a Body channel has no way to deliver an Observation, and no way to propose under another organ's name.
+  What a port authenticates is identity: which channel delivered an Observation, and which organ proposed a transition. It does not authenticate claims inside the payload. The roles an organ gives its evidence, for example, remain its claims (ROL-5), not verified facts. What ORG-6 guarantees is that an organ which is not a Body channel has no way to deliver an Observation, and no way to propose under another organ's name.
 
 ---
 
@@ -343,7 +369,7 @@ ARCHITECTURE.md says an Infon can be observed, inferred, contradicted, uncertain
 
 | ARCHITECTURE.md | Field |
 | --- | --- |
-| observed, inferred | `provenance.kind` |
+| observed, inferred | `provenance.mode`, and its roots (§8.14) |
 | uncertain | `confidence` |
 | contradicted | `status` |
 | contextual | `context` |
@@ -355,6 +381,7 @@ ARCHITECTURE.md says an Infon can be observed, inferred, contradicted, uncertain
 - **INF-4** `REVISE_INFON` changes only confidence and status. Changing relation, participants, polarity or context creates a successor Infon (OBJ-4).
 - **INF-5** Polarity has exactly two values. "Unknown" is not a polarity. It is the absence of any active Infon for that relation in that context (Law 6).
 - **INF-6** A negative-polarity Infon REQUIRES provenance that would have differed had the relation held, such as an observation, experiment or derivation. It MUST NOT be derived solely from the absence of a positive Infon.
+- **INF-7** Every Infon carries an immutable identity field, $IssueDigest$ (ISS-1, ISS-2). It is a type-specific extension of the header, not part of the shared PersistentObject header, and it is kept when the Infon's content is forgotten.
 
 ### 8.5 Pattern
 
@@ -454,6 +481,112 @@ Events are the World Language of ARCHITECTURE.md. Each event contains `type`, `s
 - **EVT-2** Subsystems MAY subscribe to events. A reaction that changes persistent state is itself a transition.
 - **EVT-3** Every event MUST be emitted by exactly one transition. Nothing else emits events.
 
+### 8.14 Evidence: Roots, Roles and Issues
+
+Provenance records where a commitment came from. This section decides what actually supports it, and when support is new. Each mechanism establishes one thing:
+
+| Mechanism | Establishes |
+| --- | --- |
+| Port | source identity |
+| Provenance | derivational history |
+| Role | the organ's evidential claim |
+| Roots | support ancestry |
+| Issue ledger | whether that support is novel |
+
+These rules guarantee that evidence counted as new is structurally novel, attributable and non-recycled. They do not guarantee that evidence is relevant, and they do not calibrate confidence.
+
+#### Grounding roots (ROT)
+
+- **ROT-1** There are exactly three kinds of grounding root:
+  - $ObservationRoot(o)$ for a persisted Observation $o$;
+  - $TestimonyRoot(s)$ for an authority-bound testimony source $s$;
+  - $ExperimentRoot(x)$, reserved, which nothing produces yet.
+- **ROT-2** A Mind cannot manufacture a new root identity (Law 8):
+  - an ObservationRoot's identity is a persisted Observation, which only a Body channel's port can deliver (ORG-6);
+  - an OrganPort may contribute only the one TestimonyRoot already bound to its own organ, $TestimonyRoot(organ\_id)$. No proposal field can name any other source.
+- **ROT-3** An authority-bound testimony source's identity MUST come from a capability, never from payload. The only authority-bound testimony sources are Mind organs testifying through their own OrganPort. $TestimonyRoot(s)$ is keyed by the organ's stable id, not its version. Other authority-bound sources MAY be defined later.
+- **ROT-4** Attributed testimony, meaning a speaker named in a payload, MUST NOT create a TestimonyRoot.
+- **ROT-5** Roots are version-relative: $Roots$ is defined on $ObjectRef(id, version)$, never on an object id alone.
+- **ROT-6** For a version $x@v$ whose provenance is $p$:
+  - if $x$ is an Observation: $Roots(x@v) = \{ObservationRoot(x)\}$;
+  - if $p.mode = testimony$: $Roots(x@v) = \{TestimonyRoot(p.organ.id)\}$;
+  - if $x$ is seed structure: $Roots(x@v) = \varnothing$;
+  - otherwise: $Roots(x@v) = \bigcup \{\, Roots(i.ref) : i \in p.inputs,\ i.role \neq attribution \,\}$.
+- **ROT-7** Roots are derived from provenance and lineage. They MUST NOT be stored as authoritative state. A root's identity survives `FORGET`, because it is an object id or a source id, and both are kept in headers and provenance.
+- **ROT-8** $grounded(x@v) := Roots(x@v) \neq \varnothing$. A commitment with no roots is **ungrounded**, not invalid.
+
+#### Roles (ROL)
+
+- **ROL-1** Every provenance input carries exactly one role: `support`, `counterevidence`, `derivation_input`, `revision_target` or `attribution`.
+- **ROL-2** Role semantics:
+
+  | Role | Passes roots | Eligible for novelty | Direction | Allowed in |
+  | --- | --- | --- | --- | --- |
+  | `support` | yes | yes | for | trust-change revision |
+  | `counterevidence` | yes | yes | against | trust-change revision |
+  | `derivation_input` | yes | yes, at formation (ISS-4) | none | formation |
+  | `revision_target` | yes | **never** | none | revision, added by the validator |
+  | `attribution` | **no** | never | none | formation and revision |
+
+- **ROL-3** An organ MAY use only the roles allowed for its operation. `revision_target` is added by the validator, never by an organ. An `attribution` input MUST be a persisted Observation.
+- **ROL-4** A trust change's evidence MUST agree with its direction. A change is **upward** if it raises confidence or moves `contradicted` → `active`, and **downward** if it lowers confidence or moves `active` → `contradicted`.
+  - An upward change REQUIRES at least one novel root from a `support` input.
+  - A downward change REQUIRES at least one novel root from a `counterevidence` input.
+  - A revision that moves both ways at once is refused.
+
+  This checks that the accounting is consistent with itself, not how much confidence should move.
+- **ROL-5** A role records the proposing organ's claim about how its evidence bears on the commitment. The validator enforces what each role does to roots. It does not verify that the organ's claim is true: a real root is not necessarily relevant evidence.
+
+#### Issues (ISS)
+
+$$
+\boxed{\text{Object identity is not epistemic issue identity.}}
+$$
+
+- **ISS-1** $ClaimKey(I) = \langle relation,\ participants,\ context \rangle$ in canonical form. Polarity is excluded, so $ClaimKey(I^{+}) = ClaimKey(I^{-})$ whenever the three fields match. $IssueDigest(I) = Digest(Canonical(ClaimKey(I)))$.
+- **ISS-2** $IssueDigest$ is an immutable Infon identity field (INF-7). It is computed by the validator at formation, never supplied by an organ, and never changes. It is kept when the Infon's content is forgotten.
+- **ISS-3** The **current head** of issue $K$ is the Infon whose $IssueDigest$ is $K$ and whose latest version is neither retired nor forgotten. Every issue MUST have at most one current head, at every point in lineage.
+- **ISS-4** `FORM_INFON` is classified by the issue's history, not by its verb:
+
+  | History of $K$ | Classification | Verdict |
+  | --- | --- | --- |
+  | no Infon has ever had issue $K$ | **first formation** | allowed, including when rootless |
+  | $K$ has a current head | **clone** | refused: revise the head instead |
+  | $K$ has history but no current head | **re-formation** | REQUIRES $NewEvidence(E, K)$, where $E$ is the formation's inputs |
+
+  For an organ's own testimony, the formation's candidate roots are $\{TestimonyRoot(organ\_id)\}$.
+- **ISS-5** A change of polarity is the only content change that stays on the same issue. It is a successor (OBJ-4) that replaces the current head in the same transition, and, being a trust change, it REQUIRES new evidence.
+- **ISS-6** `derived_from` records lineage only. It transfers no roots between issues. If support should transfer, it must appear as a support-bearing input.
+- **ISS-7** $Ledger(K)@seq$ is the set of grounding roots admitted into issue $K$'s history by transitions committed at or before $seq$:
+
+  $$
+  Ledger(K)@seq = \bigcup \{\, Roots(I@v) : IssueDigest(I) = K,\ I@v \text{ committed at or before } seq \,\}
+  $$
+
+  It includes every Infon that has ever had issue $K$: current, retired and forgotten.
+
+#### New evidence (EVD)
+
+These continue from EVD-1 (§11).
+
+- **EVD-2** $NovelRoots(E, K) = Roots(E) \setminus Ledger(K)$, where $Roots(E)$ is the union of the roots of every root-passing input in $E$. $NewEvidence(E, K) \iff NovelRoots(E, K) \neq \varnothing$.
+- **EVD-3** Only a committed transition changes $Ledger(K)$. Proposals, validation, rejection, simulation and transient reasoning consume nothing. Operations within one proposal are validated in order against the staged state, including the staged ledger. A rejection discards the staged ledger.
+- **EVD-4** A trust change REQUIRES $NewEvidence(E, K)$, where $E$ is the revision's `support` and `counterevidence` inputs. Trust changes are any change of confidence, and `active` ↔ `contradicted`.
+- **EVD-5** An administrative change needs no evidence, and it MUST NOT admit any. That is a move to `retired` with confidence unchanged. It MAY carry `attribution` inputs, but MUST NOT carry `support` or `counterevidence`. Only formation, re-formation and trust changes can add roots to an issue's ledger.
+- **EVD-6** Evidence is weighed once. A root in $Ledger(K)$ never again contributes to $NovelRoots(\cdot, K)$, in either direction. It MAY still be referenced any number of times.
+- **EVD-7** For every `FORM_INFON` and `REVISE_INFON`, the validator's justification MUST record the issue $K$, the formation's classification where there is one, and three root sets:
+  - `inherited`: $Ledger(K)$ before the operation;
+  - `candidate`: the roots its evidence carries;
+  - `novel`: $candidate \setminus inherited$.
+
+  Every evidence-accounting fact MUST be independently recomputable at replay from origin and lineage alone: roots, ledger membership, novelty, issue classification and head uniqueness. Waking up MUST refuse a Heart where any recorded accounting fact differs from its recomputation. Other historical validator decisions, such as direction (ROL-4) or V1-CERTAINTY, depend on Infon bodies. They are auditable only as far as that content survives logical forgetting (MEM-6).
+
+#### Interoceptive channels (INT)
+
+- **INT-1** The seed MAY declare interoceptive channels: Body channels that observe Entelechy itself. Their ids are unique across all channels and organs.
+- **INT-2** An Observation's mode is assigned at `CONSOLIDATE` from its channel's classification in the manifest: `self-observation` for an interoceptive channel, `observation` otherwise.
+- **INT-3** Nothing else produces `self-observation`. No proposal field can set a mode (PRV-8). The port establishes the delivery, not the truth of the payload.
+
 ---
 
 ## 9. Seed
@@ -481,9 +614,9 @@ These are the only operations that change persistent state.
 
 | Operation | REQUIRES | Effect | EMITS |
 | --- | --- | --- | --- |
-| `CONSOLIDATE` | MEM-1; PRV-4 | An Observation or episode becomes persistent at episodic level or deeper. | `MEMORY_CONSOLIDATED` |
-| `FORM_INFON` | INF-1; REF-1; INF-6 if negative | A new Infon. | `INFON_FORMED` |
-| `REVISE_INFON` | The new evidence or derivation is referenced in the justification. | Confidence or status changes (INF-4). | `INFON_REVISED` † |
+| `CONSOLIDATE` | MEM-1; PRV-4 | An Observation or episode becomes persistent at episodic level or deeper, with its mode set by INT-2. | `MEMORY_CONSOLIDATED` |
+| `FORM_INFON` | INF-1; REF-1; ROL-3; ISS-4; INF-6 if negative | A new Infon with its IssueDigest. | `INFON_FORMED` |
+| `REVISE_INFON` | ROL-3; EVD-4 and ROL-4 for a trust change; EVD-5 for an administrative change | Confidence or status changes (INF-4). | `INFON_REVISED` † |
 | `DISCOVER_PATTERN` | PAT-1 | A new Pattern. | `PATTERN_DISCOVERED` |
 | `CRYSTALLIZE_FORM` | FRM-1 | A new Form. | `FORM_CRYSTALLIZED` |
 | `REVISE_FORM` | Predictive evidence is referenced in the justification. | Successor Forms are created; predecessors are retired (FRM-2). | `FORM_REVISED` † |
@@ -505,6 +638,8 @@ These are the only operations that change persistent state.
 † Added to the event list in ARCHITECTURE.md.
 
 - **TRN-1** An operation not listed here MUST NOT change persistent state. Adding an operation means amending this document.
+- **TRN-2** An operation that has a typed form MUST be proposed in it.
+- **TRN-3** An operation that changes an existing object REQUIRES that object to exist in persistent or staged state.
 
 ---
 
@@ -683,6 +818,17 @@ This translates directly into code:
 ---
 
 ## 18. Change Log
+
+### 0.6
+
+From E001, Evidence Integrity:
+
+- **Laws.** Law 8: a Mind cannot choose or fabricate the identity of a grounding root. Law 9: support is inherited; independence is not.
+- **Evidence (§8.14).** New rule families: ROT (grounding roots), ROL (roles), ISS (issues, current heads, ledgers), EVD-2 to EVD-7 (novel roots and new evidence) and INT (interoceptive channels).
+- **Modes.** Provenance `kind` is replaced by a validator-assigned `mode`. Modes describe production, and roots describe grounding (PRV-5 to PRV-9).
+- **Organs.** ORG-2, ORG-3 and ORG-4 are restated for channels, testimony roots and attributed testimony. The ORG-6 note now points at roles.
+- **Infons.** INF-7: IssueDigest is an immutable Infon identity field.
+- **Transformations.** FORM_INFON and REVISE_INFON cite the new rules. TRN-2 and TRN-3 give precise homes to two imprecise E000 citations.
 
 ### 0.5
 
