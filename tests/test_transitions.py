@@ -6,6 +6,8 @@ from entelechy.foundation.types import (
     Check,
     EventRow,
     EventType,
+    IssueRow,
+    Mode,
     ObjectHeader,
     ObjectRef,
     ObjectType,
@@ -13,7 +15,6 @@ from entelechy.foundation.types import (
     OperationEntry,
     OrganRef,
     Provenance,
-    ProvenanceKind,
 )
 
 SECRET_BODY = b'{"content":"ultraviolet-secret"}'
@@ -21,7 +22,7 @@ SECRET_BODY = b'{"content":"ultraviolet-secret"}'
 
 def record(seq: int = 4, header_seq: int = 4) -> bytes:
     provenance = Provenance(
-        "prov:1", ProvenanceKind.OBSERVATION, (), Operation.CONSOLIDATE, OrganRef("eye", "1"), None, seq
+        "prov:1", Mode.OBSERVATION, (), Operation.CONSOLIDATE, OrganRef("eye", "1"), None, seq
     )
     header = ObjectHeader(
         "obs:1", ObjectType.OBSERVATION, 1, "prov:1", (), seq, header_seq, None, False,
@@ -66,3 +67,23 @@ def test_rows_stamped_with_another_seq_are_rejected() -> None:
 def test_non_transition_records_are_rejected() -> None:
     with pytest.raises(RecordError, match="not a v1 transition record"):
         decode_record({"type": "Origin"})
+
+
+def test_record_carries_issue_rows_inf7() -> None:
+    data = canonical_bytes(
+        build_record(
+            seq=4,
+            omega_id="omega-1",
+            proposer=OrganRef("mind", "1"),
+            reason="",
+            operations=[OperationEntry(Operation.FORM_INFON, "infon:1")],
+            prior=[],
+            provenance=[],
+            versions=[],
+            events=[],
+            justification=[],
+            issues=[IssueRow("infon:1", "sha256:" + "0" * 64)],
+        )
+    )
+    decoded = decode_record(parse(data))
+    assert decoded.rows.issues == (IssueRow("infon:1", "sha256:" + "0" * 64),)

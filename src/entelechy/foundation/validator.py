@@ -6,7 +6,7 @@ and only it can construct an AcceptedTransition (Law 5).
 """
 
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Protocol
@@ -19,6 +19,16 @@ from entelechy.foundation.canonical import (
     digest,
     parse,
 )
+from entelechy.foundation.evidence import (
+    Classification,
+    Root,
+    classify,
+    issue_digest,
+    ledger,
+    novel_roots,
+    roots_of_many,
+    testimony_root,
+)
 from entelechy.foundation.seed import Manifest
 from entelechy.foundation.types import (
     V1_OPERATIONS,
@@ -30,6 +40,8 @@ from entelechy.foundation.types import (
     FormInfon,
     InfonBody,
     InfonStatus,
+    IssueRow,
+    Mode,
     ObjectHeader,
     ObjectRef,
     ObjectReferent,
@@ -43,17 +55,24 @@ from entelechy.foundation.types import (
     Proposal,
     ProposedOperation,
     Provenance,
-    ProvenanceKind,
+    ProvenanceInput,
     Referent,
     RegionReferent,
     ReviseInfon,
+    Role,
+    RoleInput,
 )
 
 UNIMPLEMENTED = "V1-UNIMPLEMENTED"
 CERTAINTY = "V1-CERTAINTY"
-REVISE_REQUIRES = "§10 REVISE_INFON"
 
 _CAPABILITY = object()
+
+# ROL-2's "Allowed in" column: which roles an organ may use for each
+# operation. `revision_target` is never here — the validator adds it, an
+# organ never proposes it (ROL-3).
+FORM_INFON_ALLOWED_ROLES = frozenset({Role.DERIVATION_INPUT, Role.ATTRIBUTION})
+REVISE_INFON_ALLOWED_ROLES = frozenset({Role.SUPPORT, Role.COUNTEREVIDENCE, Role.ATTRIBUTION})
 
 
 class RetentionPolicy(Protocol):
@@ -76,6 +95,14 @@ class HeartReader(Protocol):
     def content(self, body_digest: str) -> bytes | None: ...
 
     def provenance(self, provenance_id: str) -> Provenance | None: ...
+
+    def header_at(self, ref: ObjectRef) -> ObjectHeader | None: ...
+
+    def infon_ids_for_issue(self, issue: str) -> Iterable[str]: ...
+
+    def versions_of(self, object_id: str) -> Sequence[ObjectHeader]: ...
+
+    def issue_of(self, object_id: str) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -114,6 +141,7 @@ class AcceptedTransition:
     events: tuple[EventRow, ...]
     justification: tuple[Check, ...]
     bodies: Mapping[str, bytes]
+    issues: tuple[IssueRow, ...] = ()
     capability: object = field(repr=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -139,8 +167,11 @@ class _Work:
         self.events: list[EventRow] = []
         self.checks: list[Check] = []
         self.bodies: dict[str, bytes] = {}
+        self.issues: list[IssueRow] = []
         self._latest: dict[str, ObjectHeader] = {}
         self._provenance: dict[str, Provenance] = {}
+        self._issue_of: dict[str, str] = {}
+        self._issue_members: dict[str, list[str]] = {}
 
     def latest(self, object_id: str) -> ObjectHeader | None:
         staged = self._latest.get(object_id)
@@ -150,6 +181,12 @@ class _Work:
         staged = [header for header in self.versions if header.id == object_id]
         return self.heart.versions(object_id) + staged
 
+    def header_at(self, ref: ObjectRef) -> ObjectHeader | None:
+        for header in self.versions:
+            if header.id == ref.id and header.version == ref.version:
+                return header
+        return self.heart.header_at(ref)
+
     def content(self, body_digest: str) -> bytes | None:
         staged = self.bodies.get(body_digest)
         return staged if staged is not None else self.heart.content(body_digest)
@@ -157,6 +194,15 @@ class _Work:
     def provenance_of(self, provenance_id: str) -> Provenance | None:
         staged = self._provenance.get(provenance_id)
         return staged if staged is not None else self.heart.provenance(provenance_id)
+
+    def issue_of(self, object_id: str) -> str | None:
+        staged = self._issue_of.get(object_id)
+        return staged if staged is not None else self.heart.issue_of(object_id)
+
+    def infon_ids_for_issue(self, issue: str) -> list[str]:
+        persisted = list(self.heart.infon_ids_for_issue(issue))
+        staged = self._issue_members.get(issue, [])
+        return persisted + [object_id for object_id in staged if object_id not in persisted]
 
     def stage(self, header: ObjectHeader, provenance: Provenance | None, body: bytes | None) -> None:
         self._latest[header.id] = header
@@ -167,6 +213,11 @@ class _Work:
         if body is not None:
             self.bodies[header.body_digest] = body
 
+    def stage_issue(self, object_id: str, issue: str) -> None:
+        self.issues.append(IssueRow(object_id, issue))
+        self._issue_of[object_id] = issue
+        self._issue_members.setdefault(issue, []).append(object_id)
+
     def emit(self, event_type: EventType, object_id: str) -> None:
         self.events.append(EventRow(self.seq, len(self.events), event_type, object_id))
 
@@ -174,9 +225,9 @@ class _Work:
 def _cited_inputs(operation: ProposedOperation) -> tuple[str, ...]:
     match operation:
         case FormInfon(inputs=inputs):
-            return inputs
+            return tuple(item.object_id for item in inputs)
         case ReviseInfon(evidence=evidence):
-            return evidence
+            return tuple(item.object_id for item in evidence)
         case _:
             return ()
 
@@ -217,6 +268,7 @@ class Validator:
             events=tuple(work.events),
             justification=tuple(work.checks),
             bodies=dict(work.bodies),
+            issues=tuple(work.issues),
             capability=_CAPABILITY,
         )
 
@@ -276,7 +328,9 @@ class Validator:
             check = outcome
         provenance = Provenance(
             id=self._new_id("prov"),
-            kind=ProvenanceKind.OBSERVATION,
+            mode=Mode.SELF_OBSERVATION
+            if self._manifest.is_interoceptive(observation.channel)
+            else Mode.OBSERVATION,
             inputs=(),
             operation=Operation.CONSOLIDATE,
             organ=observation.channel,
@@ -349,12 +403,6 @@ class Validator:
             violations.append(
                 Violation(UNIMPLEMENTED, "negative Infons need a negative-evidence contract (INF-6)")
             )
-        if op.provenance_kind is ProvenanceKind.ORIGIN:
-            violations.append(Violation("PRV-5", "origin provenance is only assigned at creation"))
-        if op.provenance_kind in (ProvenanceKind.EXPERIMENT, ProvenanceKind.SIMULATION):
-            violations.append(
-                Violation(UNIMPLEMENTED, f"{op.provenance_kind.value} provenance needs Models")
-            )
         if op.relation not in self._manifest.relations:
             violations.append(
                 Violation("INF-1", f"relation {op.relation!r} is not in the seed vocabulary")
@@ -366,22 +414,52 @@ class Validator:
             violations.append(Violation("INF-1", f"context has no canonical form: {error}"))
         for referent in op.participants:
             violations += self._referent(referent, work)
-        inputs, input_violations = _resolve_inputs(op.inputs, work)
+        for item in op.inputs:
+            if item.role not in FORM_INFON_ALLOWED_ROLES:
+                violations.append(
+                    Violation(
+                        "ROL-3",
+                        f"FORM_INFON cannot use role {item.role.value}",
+                        {"object": item.object_id},
+                    )
+                )
+        resolved, input_violations = _resolve_role_inputs(op.inputs, work)
         violations += input_violations
-        if op.provenance_kind is ProvenanceKind.OBSERVATION and not any(
-            (header := work.latest(ref.id)) is not None and header.type is ObjectType.OBSERVATION
-            for ref in inputs
-        ):
-            violations.append(
-                Violation("PRV-1", "observation provenance must cite a persisted Observation")
-            )
-        if op.provenance_kind is ProvenanceKind.DERIVATION and not op.inputs:
-            violations.append(Violation("PRV-3", "derivation provenance must reference its inputs"))
         for predecessor in op.derived_from:
             if work.latest(predecessor) is None:
                 violations.append(Violation("OBJ-4", f"predecessor {predecessor} does not exist"))
         if violations:
             return violations
+
+        mode = _formation_mode(resolved)
+
+        issue = issue_digest(op.relation, op.participants, op.context)
+        classification = classify(issue, work)
+        if classification is Classification.CLONE:
+            return [
+                Violation(
+                    "ISS-4",
+                    "this issue already has a current head; revise it instead of cloning it",
+                    {"issue": issue},
+                )
+            ]
+
+        inherited = ledger(issue, work)
+        if mode is Mode.TESTIMONY:
+            candidate = frozenset({testimony_root(proposal.organ.id)})
+        else:
+            candidate = roots_of_many(
+                (item.ref for item in resolved if item.role is Role.DERIVATION_INPUT), work
+            )
+        novel = novel_roots(candidate, inherited)
+        if classification is Classification.RE_FORMATION and not novel:
+            return [
+                Violation(
+                    "ISS-4",
+                    "re-formation requires new evidence: no root in this formation is novel to the issue",
+                    {"issue": issue},
+                )
+            ]
 
         infon = InfonBody(
             relation=op.relation,
@@ -394,8 +472,8 @@ class Validator:
         body = canonical_bytes(infon.to_canonical())
         provenance = Provenance(
             id=self._new_id("prov"),
-            kind=op.provenance_kind,
-            inputs=inputs,
+            mode=mode,
+            inputs=resolved,
             operation=Operation.FORM_INFON,
             organ=proposal.organ,
             seed_spec=None,
@@ -414,12 +492,24 @@ class Validator:
             body_digest=digest(body),
         )
         work.stage(header, provenance, body)
+        work.stage_issue(header.id, issue)
         work.operations.append(OperationEntry(Operation.FORM_INFON, header.id))
         work.checks += [
             Check(index, "INF-1", {"relation_in_vocabulary": True}),
             Check(index, "REF-1", {"participants": len(op.participants)}),
-            Check(index, "PRV-4", {"inputs": len(inputs)}),
+            Check(index, "PRV-4", {"inputs": len(resolved)}),
             Check(index, CERTAINTY, {"open_interval": True}),
+            Check(
+                index,
+                "EVD-7",
+                {
+                    "issue": issue,
+                    "classification": classification.value,
+                    "inherited": _roots_canonical(inherited),
+                    "candidate": _roots_canonical(candidate),
+                    "novel": _roots_canonical(novel),
+                },
+            ),
         ]
         work.emit(EventType.INFON_FORMED, header.id)
         return []
@@ -463,7 +553,7 @@ class Validator:
     ) -> list[Violation]:
         header = work.latest(op.infon_id)
         if header is None:
-            return [_missing("PER-6", "Infon", op.infon_id, work)]
+            return [_missing("TRN-3", "Infon", op.infon_id, work)]
         if header.type is ObjectType.OBSERVATION:
             return [Violation("OBS-1", "Observations are never edited; revise the Infons instead")]
         if header.type is not ObjectType.INFON:
@@ -518,38 +608,94 @@ class Validator:
             )
         elif not trust_changes:
             violations.append(Violation("INF-4", "the revision changes nothing"))
-
-        # Evidence is new only if no version of this Infon has cited it. It is
-        # judged per version: a newer version of something already cited is
-        # itself new evidence.
-        evidence, evidence_violations = _resolve_inputs(op.evidence, work)
-        violations += evidence_violations
-        cited: set[ObjectRef] = set()
-        for version in work.versions_of(header.id):
-            version_provenance = work.provenance_of(version.provenance_id)
-            if version_provenance is not None:
-                cited.update(version_provenance.inputs)
-        new_evidence = [ref for ref in evidence if ref not in cited]
-        if not op.evidence:
-            violations.append(Violation(REVISE_REQUIRES, "REVISE_INFON requires evidence"))
-        elif any(ref.id == header.id for ref in evidence):
-            violations.append(
-                Violation(REVISE_REQUIRES, "an Infon cannot be evidence for its own revision")
-            )
-        elif not evidence_violations and not new_evidence:
-            violations.append(
-                Violation(REVISE_REQUIRES, "the evidence must include an input not already cited")
-            )
         if violations:
             return violations
 
-        # The revised commitment derives from the version it revises and the
-        # new evidence, so both are provenance inputs.
+        # ROL-3: revision may cite support, counterevidence and attribution;
+        # revision_target is added below, by the validator, never by an organ.
+        for item in op.evidence:
+            if item.role not in REVISE_INFON_ALLOWED_ROLES:
+                violations.append(
+                    Violation(
+                        "ROL-3",
+                        f"REVISE_INFON cannot use role {item.role.value}",
+                        {"object": item.object_id},
+                    )
+                )
+        resolved, evidence_violations = _resolve_role_inputs(op.evidence, work)
+        violations += evidence_violations
+        if violations:
+            return violations
+
+        # ROL-4: direction. Upward raises confidence or moves contradicted ->
+        # active; downward lowers confidence or moves active -> contradicted.
+        # Moving both ways at once is refused.
+        directions: set[str] = set()
+        if op.body.confidence > current.confidence:
+            directions.add("up")
+        if op.body.confidence < current.confidence:
+            directions.add("down")
+        if current.status is InfonStatus.CONTRADICTED and op.body.status is InfonStatus.ACTIVE:
+            directions.add("up")
+        if current.status is InfonStatus.ACTIVE and op.body.status is InfonStatus.CONTRADICTED:
+            directions.add("down")
+        if len(directions) > 1:
+            return [
+                Violation("ROL-4", "a revision that moves both upward and downward at once is refused")
+            ]
+        direction = next(iter(directions), None)
+
+        issue = work.issue_of(header.id)
+        assert issue is not None, "every committed Infon was formed with an issue (INF-7)"
+        inherited = ledger(issue, work)
+        support, counterevidence = _evidence_by_direction(resolved)
+
+        # EVD-5: an administrative change (a move to retired with confidence
+        # unchanged) needs no evidence and must not admit any.
+        is_administrative = _is_administrative_change(op.body.status, direction)
+        if is_administrative:
+            violation = _administrative_evidence_violation(support, counterevidence)
+            if violation is not None:
+                return [violation]
+            candidate: frozenset[Root] = frozenset()
+            novel: frozenset[Root] = frozenset()
+            classification = "administrative"
+        else:
+            candidate_support = roots_of_many(support, work)
+            candidate_counterevidence = roots_of_many(counterevidence, work)
+            novel_support = novel_roots(candidate_support, inherited)
+            novel_counterevidence = novel_roots(candidate_counterevidence, inherited)
+            # EVD-4 asks whether there is new evidence at all; ROL-4 asks,
+            # only once EVD-4 is satisfied, whether it is on the side the
+            # direction requires. Citing the target, or anything else already
+            # in the issue's ledger, fails EVD-4 by itself (§4.3): there is
+            # nothing special-cased about self-citation.
+            if not (novel_support or novel_counterevidence):
+                violations.append(Violation("EVD-4", "a trust change requires new evidence"))
+            elif direction == "up" and not novel_support:
+                violations.append(
+                    Violation("ROL-4", "an upward change requires a novel root from a support input")
+                )
+            elif direction == "down" and not novel_counterevidence:
+                violations.append(
+                    Violation(
+                        "ROL-4",
+                        "a downward change requires a novel root from a counterevidence input",
+                    )
+                )
+            if violations:
+                return violations
+            candidate = candidate_support | candidate_counterevidence
+            novel = novel_support | novel_counterevidence
+            classification = "trust_change"
+
+        # The revised commitment inherits the roots of the version it revises
+        # (Law 9) and whatever the cited evidence itself is rooted in.
         body = canonical_bytes(op.body.to_canonical())
         provenance = Provenance(
             id=self._new_id("prov"),
-            kind=ProvenanceKind.DERIVATION,
-            inputs=(header.ref(), *evidence),
+            mode=Mode.REVISION,
+            inputs=(ProvenanceInput(header.ref(), Role.REVISION_TARGET), *resolved),
             operation=Operation.REVISE_INFON,
             organ=proposal.organ,
             seed_spec=None,
@@ -569,7 +715,16 @@ class Validator:
         work.checks += [
             Check(index, "INF-4", {"changed": trust_changes}),
             Check(
-                index, REVISE_REQUIRES, {"new_evidence": [ref.to_canonical() for ref in new_evidence]}
+                index,
+                "EVD-7",
+                {
+                    "issue": issue,
+                    "classification": classification,
+                    "direction": direction,
+                    "inherited": _roots_canonical(inherited),
+                    "candidate": _roots_canonical(candidate),
+                    "novel": _roots_canonical(novel),
+                },
             ),
             Check(index, CERTAINTY, {"open_interval": True}),
         ]
@@ -583,9 +738,9 @@ class Validator:
         if header is None:
             if op.object_id in work.transient:
                 return [Violation("MEM-3", "transient state lapses on its own; FORGET is for the Heart")]
-            return [Violation("MEM-3", f"there is no persistent object {op.object_id}")]
+            return [Violation("TRN-3", f"there is no persistent object {op.object_id}")]
         provenance = work.provenance_of(header.provenance_id)
-        if provenance is not None and provenance.kind is ProvenanceKind.ORIGIN:
+        if provenance is not None and provenance.mode is Mode.ORIGIN:
             return [Violation("MEM-4", "seed structure cannot be forgotten")]
         if header.forgotten:
             return [Violation("MEM-3", f"{op.object_id} is already forgotten")]
@@ -626,7 +781,7 @@ class Validator:
 
     def _other(self, op: OtherOperation) -> list[Violation]:
         if op.name in {operation.value for operation in V1_OPERATIONS}:
-            return [Violation("TRN-1", f"{op.name} must be proposed with its typed operation")]
+            return [Violation("TRN-2", f"{op.name} must be proposed with its typed operation")]
         if op.name in {operation.value for operation in Operation}:
             return [Violation(UNIMPLEMENTED, f"{op.name} is legal in FOUNDATIONS but not built in v1")]
         return [Violation("TRN-1", f"{op.name} is not a legal operation")]
@@ -653,6 +808,38 @@ def _field_bytes(body: InfonBody) -> dict[str, bytes]:
     return {name: canonical_bytes(value) for name, value in body.to_canonical().items()}
 
 
+def _administrative_evidence_violation(
+    support: tuple[ObjectRef, ...], counterevidence: tuple[ObjectRef, ...]
+) -> Violation | None:
+    """EVD-5: an administrative change must not admit support or counterevidence."""
+    if support or counterevidence:
+        return Violation("EVD-5", "an administrative change must not admit support or counterevidence")
+    return None
+
+
+def _formation_mode(resolved: Sequence[ProvenanceInput]) -> Mode:
+    """PRV-8: mode is derived from the roles present, never supplied by the organ."""
+    if not resolved:
+        return Mode.TESTIMONY
+    if all(item.role is Role.ATTRIBUTION for item in resolved):
+        return Mode.ATTRIBUTED
+    return Mode.DERIVATION
+
+
+def _is_administrative_change(status: InfonStatus, direction: str | None) -> bool:
+    """EVD-5: a move to retired with confidence unchanged needs no evidence."""
+    return status is InfonStatus.RETIRED and direction is None
+
+
+def _evidence_by_direction(
+    resolved: Sequence[ProvenanceInput],
+) -> tuple[tuple[ObjectRef, ...], tuple[ObjectRef, ...]]:
+    """Split a revision's resolved evidence into its support and counterevidence."""
+    support = tuple(item.ref for item in resolved if item.role is Role.SUPPORT)
+    counterevidence = tuple(item.ref for item in resolved if item.role is Role.COUNTEREVIDENCE)
+    return support, counterevidence
+
+
 def _missing(rule: str, role: str, object_id: str, work: _Work) -> Violation:
     if object_id in work.transient:
         return Violation(rule, f"{role} {object_id} is transient", {"object": object_id})
@@ -668,15 +855,27 @@ def _persisted_observation(observation_id: str, work: _Work) -> list[Violation]:
     return []
 
 
-def _resolve_inputs(
-    object_ids: Sequence[str], work: _Work
-) -> tuple[tuple[ObjectRef, ...], list[Violation]]:
-    refs: list[ObjectRef] = []
+def _resolve_role_inputs(
+    items: Sequence[RoleInput], work: _Work
+) -> tuple[tuple[ProvenanceInput, ...], list[Violation]]:
+    resolved: list[ProvenanceInput] = []
     violations: list[Violation] = []
-    for object_id in object_ids:
-        header = work.latest(object_id)
+    for item in items:
+        header = work.latest(item.object_id)
         if header is None:
-            violations.append(_missing("PRV-4", "provenance input", object_id, work))
-        else:
-            refs.append(header.ref())
-    return tuple(refs), violations
+            violations.append(_missing("PRV-4", "provenance input", item.object_id, work))
+            continue
+        resolved.append(ProvenanceInput(header.ref(), item.role))
+        if item.role is Role.ATTRIBUTION and header.type is not ObjectType.OBSERVATION:
+            violations.append(
+                Violation(
+                    "ROL-3",
+                    "an attribution input must be a persisted Observation",
+                    {"object": item.object_id},
+                )
+            )
+    return tuple(resolved), violations
+
+
+def _roots_canonical(roots: frozenset[Root]) -> list[Canonical]:
+    return [item.to_canonical() for item in sorted(roots, key=lambda item: (item.kind, item.key))]

@@ -19,18 +19,21 @@ from entelechy.foundation.transitions import build_record, decode_record
 from entelechy.foundation.types import (
     EventRow,
     EventType,
+    IssueRow,
+    Mode,
     ObjectHeader,
     ObjectRef,
     ObjectType,
     Operation,
     OrganRef,
     Provenance,
-    ProvenanceKind,
+    ProvenanceInput,
+    Role,
     Rows,
 )
 from entelechy.foundation.validator import AcceptedTransition
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 _TABLES = """
 CREATE TABLE meta (
@@ -53,7 +56,7 @@ CREATE TABLE transitions (
 
 CREATE TABLE provenance (
     id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
+    mode TEXT NOT NULL,
     operation TEXT,
     organ_id TEXT,
     organ_version TEXT,
@@ -80,6 +83,7 @@ CREATE TABLE provenance_inputs (
     position INTEGER NOT NULL,
     object_id TEXT NOT NULL,
     version INTEGER NOT NULL,
+    role TEXT NOT NULL,
     PRIMARY KEY (provenance_id, position),
     FOREIGN KEY (object_id, version) REFERENCES object_versions (object_id, version)
 ) STRICT;
@@ -96,6 +100,13 @@ CREATE TABLE events (
     object_id TEXT NOT NULL,
     PRIMARY KEY (seq, idx)
 ) STRICT;
+
+CREATE TABLE infon_issues (
+    object_id TEXT PRIMARY KEY,
+    issue_digest TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX infon_issues_by_issue ON infon_issues (issue_digest);
 """
 
 _APPEND_ONLY = (
@@ -105,6 +116,7 @@ _APPEND_ONLY = (
     "object_versions",
     "provenance_inputs",
     "events",
+    "infon_issues",
 )
 
 _GUARDS = """
@@ -394,6 +406,7 @@ class Store:
                 versions=accepted.versions,
                 events=accepted.events,
                 justification=accepted.justification,
+                issues=accepted.issues,
             )
         )
         with self._transaction():
@@ -413,16 +426,17 @@ class Store:
         self._insert_versions(rows.versions)
         self._insert_inputs(rows.provenance)
         self._insert_events(rows.events)
+        self._insert_issues(rows.issues)
 
     def _insert_provenance(self, provenance: Iterable[Provenance]) -> None:
         self._conn.executemany(
             "INSERT INTO provenance "
-            "(id, kind, operation, organ_id, organ_version, seed_spec, seq) "
+            "(id, mode, operation, organ_id, organ_version, seed_spec, seq) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     item.id,
-                    item.kind.value,
+                    item.mode.value,
                     None if item.operation is None else item.operation.value,
                     None if item.organ is None else item.organ.id,
                     None if item.organ is None else item.organ.version,
@@ -456,12 +470,12 @@ class Store:
 
     def _insert_inputs(self, provenance: Iterable[Provenance]) -> None:
         self._conn.executemany(
-            "INSERT INTO provenance_inputs (provenance_id, position, object_id, version) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO provenance_inputs (provenance_id, position, object_id, version, role) "
+            "VALUES (?, ?, ?, ?, ?)",
             [
-                (item.id, position, ref.id, ref.version)
+                (item.id, position, entry.ref.id, entry.ref.version, entry.role.value)
                 for item in provenance
-                for position, ref in enumerate(item.inputs)
+                for position, entry in enumerate(item.inputs)
             ],
         )
 
@@ -469,6 +483,12 @@ class Store:
         self._conn.executemany(
             "INSERT INTO events (seq, idx, type, object_id) VALUES (?, ?, ?, ?)",
             [(event.seq, event.index, event.type.value, event.object_id) for event in events],
+        )
+
+    def _insert_issues(self, issues: Iterable[IssueRow]) -> None:
+        self._conn.executemany(
+            "INSERT INTO infon_issues (object_id, issue_digest) VALUES (?, ?)",
+            [(item.object_id, item.issue_digest) for item in issues],
         )
 
     def _insert_contents(self, contents: Mapping[str, bytes]) -> None:
@@ -514,6 +534,35 @@ class Store:
         ).fetchone()
         return None if row is None else _header(row)
 
+    def header_at(self, ref: ObjectRef) -> ObjectHeader | None:
+        """The header of one specific version. Roots are version-relative (ROT-5)."""
+        row = self._conn.execute(
+            f"SELECT {_VERSION_COLUMNS} FROM object_versions WHERE object_id = ? AND version = ?",
+            (ref.id, ref.version),
+        ).fetchone()
+        return None if row is None else _header(row)
+
+    def provenance_of(self, provenance_id: str) -> Provenance | None:
+        return self.provenance(provenance_id)
+
+    def issue_of(self, object_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT issue_digest FROM infon_issues WHERE object_id = ?", (object_id,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def infon_ids_for_issue(self, issue: str) -> list[str]:
+        return [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT object_id FROM infon_issues WHERE issue_digest = ? ORDER BY object_id",
+                (issue,),
+            )
+        ]
+
+    def versions_of(self, object_id: str) -> list[ObjectHeader]:
+        return self.versions(object_id)
+
     def versions(self, object_id: str | None = None) -> list[ObjectHeader]:
         if object_id is None:
             rows = self._conn.execute(
@@ -529,23 +578,23 @@ class Store:
 
     def provenance(self, provenance_id: str) -> Provenance | None:
         row = self._conn.execute(
-            "SELECT id, kind, operation, organ_id, organ_version, seed_spec, seq "
+            "SELECT id, mode, operation, organ_id, organ_version, seed_spec, seq "
             "FROM provenance WHERE id = ?",
             (provenance_id,),
         ).fetchone()
         if row is None:
             return None
         inputs = tuple(
-            ObjectRef(object_id, version)
-            for object_id, version in self._conn.execute(
-                "SELECT object_id, version FROM provenance_inputs "
+            ProvenanceInput(ObjectRef(object_id, version), Role(role))
+            for object_id, version, role in self._conn.execute(
+                "SELECT object_id, version, role FROM provenance_inputs "
                 "WHERE provenance_id = ? ORDER BY position",
                 (provenance_id,),
             )
         )
         return Provenance(
             id=row[0],
-            kind=ProvenanceKind(row[1]),
+            mode=Mode(row[1]),
             inputs=inputs,
             operation=None if row[2] is None else Operation(row[2]),
             organ=None if row[3] is None else OrganRef(row[3], row[4]),
@@ -576,5 +625,14 @@ class Store:
             EventRow(seq, index, EventType(event_type), object_id)
             for seq, index, event_type, object_id in self._conn.execute(
                 "SELECT seq, idx, type, object_id FROM events ORDER BY seq, idx"
+            )
+        ]
+
+    def issues(self) -> list[IssueRow]:
+        """Every Infon's IssueDigest, in a stable order (INF-7). Part of Heart structure."""
+        return [
+            IssueRow(object_id, issue_digest)
+            for object_id, issue_digest in self._conn.execute(
+                "SELECT object_id, issue_digest FROM infon_issues ORDER BY object_id"
             )
         ]

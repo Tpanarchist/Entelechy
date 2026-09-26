@@ -2,22 +2,27 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
-from harness import EYE, MIND, Harness, accepted, infon_from, rejected
+from harness import EYE, MIND, Harness, accepted, infon_from, rejected, form_testimony
 
 from entelechy.foundation.canonical import parse
 from entelechy.foundation.types import (
     Consolidate,
     EventType,
+    Forget,
     FormInfon,
     InfonBody,
-    ObjectType,
+    InfonStatus,
+    Mode,
     ObjectReferent,
+    ObjectType,
     OpaqueReferent,
     OrganRef,
     OtherOperation,
     Polarity,
     Proposal,
-    ProvenanceKind,
+    ReviseInfon,
+    Role,
+    RoleInput,
 )
 from entelechy.foundation.validator import (
     CERTAINTY,
@@ -149,53 +154,51 @@ def test_a_relation_outside_the_vocabulary_is_rejected_inf1(heart: Harness) -> N
     assert rejected(heart.propose(Consolidate(observation), infon)).rules == {"INF-1"}
 
 
-def test_learned_structure_cannot_claim_origin_prv5(heart: Harness) -> None:
+def test_an_organ_cannot_use_support_or_counterevidence_at_formation_rol3(heart: Harness) -> None:
     observation = heart.receive()
-    infon = replace(infon_from(observation), provenance_kind=ProvenanceKind.ORIGIN)
-    assert "PRV-5" in rejected(heart.propose(Consolidate(observation), infon)).rules
+    for role in (Role.SUPPORT, Role.COUNTEREVIDENCE, Role.REVISION_TARGET):
+        infon = replace(infon_from(observation), inputs=(RoleInput(observation, role),))
+        assert rejected(heart.propose(Consolidate(observation), infon)).rules == {"ROL-3"}
 
 
-@pytest.mark.parametrize("kind", [ProvenanceKind.EXPERIMENT, ProvenanceKind.SIMULATION])
-def test_experiment_and_simulation_provenance_are_unimplemented(
-    heart: Harness, kind: ProvenanceKind
-) -> None:
+def test_an_attribution_input_must_be_a_persisted_observation_rol3(heart: Harness) -> None:
+    testify = form_testimony(heart.manifest.self_id)
+    (witness_id,) = [h.id for h in heart.commit(testify).versions]
     observation = heart.receive()
-    infon = replace(infon_from(observation), provenance_kind=kind)
-    assert rejected(heart.propose(Consolidate(observation), infon)).rules == {UNIMPLEMENTED}
-
-
-def test_observation_provenance_must_cite_an_observation_prv1(heart: Harness) -> None:
-    infon = FormInfon(
-        relation="R1",
-        participants=(ObjectReferent(heart.manifest.self_id),),
-        confidence=Decimal("0.6"),
-        provenance_kind=ProvenanceKind.OBSERVATION,
-        inputs=(heart.manifest.self_id,),
+    infon = replace(
+        infon_from(observation),
+        inputs=(
+            RoleInput(observation, Role.DERIVATION_INPUT),
+            RoleInput(witness_id, Role.ATTRIBUTION),
+        ),
     )
-    assert rejected(heart.propose(infon)).rules == {"PRV-1"}
+    assert rejected(heart.propose(Consolidate(observation), infon)).rules == {"ROL-3"}
 
 
-def test_derivation_must_reference_inputs_prv3(heart: Harness) -> None:
-    infon = FormInfon(
-        relation="R1",
-        participants=(ObjectReferent(heart.manifest.self_id),),
-        confidence=Decimal("0.6"),
-        provenance_kind=ProvenanceKind.DERIVATION,
-        inputs=(),
-    )
-    assert rejected(heart.propose(infon)).rules == {"PRV-3"}
+def test_no_inputs_is_testimony_mode_org3(heart: Harness) -> None:
+    infon = form_testimony(heart.manifest.self_id)
+    result = accepted(heart.propose(infon))
+    assert result.provenance[0].organ == MIND
+    assert result.provenance[0].mode is Mode.TESTIMONY
 
 
-def test_testimony_from_an_organ_needs_no_inputs_org3(heart: Harness) -> None:
+def test_a_derivation_input_makes_derivation_mode(heart: Harness) -> None:
+    observation = heart.receive()
+    result = accepted(heart.propose(Consolidate(observation), infon_from(observation)))
+    (infon_header,) = [h for h in result.versions if h.type is ObjectType.INFON]
+    assert result.provenance[-1].mode is Mode.DERIVATION
+
+
+def test_only_attribution_inputs_makes_attributed_mode_org4(heart: Harness) -> None:
+    utterance = heart.receive(content="hello")
     infon = FormInfon(
         relation="R2",
         participants=(ObjectReferent(heart.manifest.self_id),),
         confidence=Decimal("0.6"),
-        provenance_kind=ProvenanceKind.TESTIMONY,
-        inputs=(),
+        inputs=(RoleInput(utterance, Role.ATTRIBUTION),),
     )
-    result = accepted(heart.propose(infon))
-    assert result.provenance[0].organ == MIND
+    result = accepted(heart.propose(Consolidate(utterance), infon))
+    assert result.provenance[-1].mode is Mode.ATTRIBUTED
 
 
 def test_opaque_identifiers_must_come_from_the_observation_ref1(heart: Harness) -> None:
@@ -234,12 +237,24 @@ def test_context_must_be_canonical_inf1(heart: Harness) -> None:
     [
         ("PROPOSE_MODEL", UNIMPLEMENTED),
         ("RECORD_RESOURCE_THRESHOLD", UNIMPLEMENTED),
-        ("FORM_INFON", "TRN-1"),
+        ("FORM_INFON", "TRN-2"),
+        ("CONSOLIDATE", "TRN-2"),
         ("DREAM", "TRN-1"),
     ],
 )
 def test_operations_outside_v1_are_rejected_by_name(heart: Harness, name: str, rule: str) -> None:
     assert rejected(heart.propose(OtherOperation(name))).rules == {rule}
+
+
+def test_a_revision_of_an_unknown_infon_is_rejected_trn3(heart: Harness) -> None:
+    placeholder = InfonBody("R1", (), Polarity.POSITIVE, {}, Decimal("0.6"), InfonStatus.ACTIVE)
+    result = rejected(heart.propose(ReviseInfon("infon:ghost", 1, placeholder, ())))
+    assert result.rules == {"TRN-3"}
+
+
+def test_forgetting_an_unknown_object_is_rejected_trn3(heart: Harness) -> None:
+    result = rejected(heart.propose(Forget("infon:ghost", 1, "gone already")))
+    assert result.rules == {"TRN-3"}
 
 
 def test_rejections_read_as_rules_and_reasons(heart: Harness) -> None:
@@ -255,3 +270,103 @@ def test_validation_does_not_touch_the_store(heart: Harness) -> None:
     accepted(heart.propose(Consolidate(observation), infon_from(observation)))
     assert heart.store.versions() == before
     assert heart.store.transitions() == []
+
+
+# Issues (ISS) and evidence accounting (EVD), FOUNDATIONS §8.14.
+
+
+def test_first_formation_from_testimony_is_allowed_unconditionally_iss4(heart: Harness) -> None:
+    """First formation is allowed whether or not it is rootless (ISS-4); this
+    exercises the grounded case (organ testimony). The rootless case (an
+    attributed-only formation) is case 24 in tests/test_conformance.py."""
+    infon = form_testimony(heart.manifest.self_id)
+    result = accepted(heart.propose(infon))
+    check = next(c for c in result.justification if c.rule == "EVD-7")
+    assert check.measured["classification"] == "first_formation"
+
+
+def test_cloning_an_issue_with_a_current_head_is_refused_iss4(heart: Harness) -> None:
+    infon = form_testimony(heart.manifest.self_id)
+    heart.commit(infon)
+    clone = replace(infon, confidence=Decimal("0.7"))
+    assert rejected(heart.propose(clone)).rules == {"ISS-4"}
+
+
+def test_two_different_issues_may_each_form_org3(heart: Harness) -> None:
+    first = form_testimony(heart.manifest.self_id, relation="R1")
+    second = form_testimony(heart.manifest.self_id, relation="R2")
+    result = heart.commit(first, second)
+    assert len(result.versions) == 2
+
+
+def _retire(heart: Harness, infon_id: str) -> None:
+    """Administratively retire an Infon (EVD-5): its issue keeps history but no current head."""
+    header = heart.store.latest(infon_id)
+    assert header is not None
+    data = heart.store.content(header.body_digest)
+    assert data is not None
+    body = replace(InfonBody.from_canonical(parse(data)), status=InfonStatus.RETIRED)
+    heart.commit(ReviseInfon(infon_id, header.version, body, ()))
+
+
+def test_reformation_without_new_evidence_is_refused_iss4(heart: Harness) -> None:
+    infon = form_testimony(heart.manifest.self_id)
+    (infon_id,) = [h.id for h in heart.commit(infon).versions]
+    _retire(heart, infon_id)
+    # Retired: the issue has history but no current head. The same organ's
+    # form_testimony carries no new root, since TestimonyRoot(MIND) is already
+    # in the issue's ledger.
+    assert rejected(heart.propose(infon)).rules == {"ISS-4"}
+
+
+def test_reformation_with_new_evidence_is_allowed_iss4(heart: Harness) -> None:
+    infon = form_testimony(heart.manifest.self_id, relation="R2")
+    (infon_id,) = [h.id for h in heart.commit(infon).versions]
+    _retire(heart, infon_id)
+
+    evidence = heart.receive()
+    reformed = FormInfon(
+        relation="R2",
+        participants=(ObjectReferent(heart.manifest.self_id),),
+        confidence=Decimal("0.6"),
+        inputs=(RoleInput(evidence, Role.DERIVATION_INPUT),),
+    )
+    result = heart.commit(Consolidate(evidence), reformed)
+    check = next(c for c in result.justification if c.rule == "EVD-7")
+    assert check.measured["classification"] == "re_formation"
+    assert check.measured["novel"]
+
+
+def test_a_mind_cannot_fabricate_another_organs_testimony_root_law8_rot2(heart: Harness) -> None:
+    """Law 8 / ROT-2: a Mind can cause its own capability-bound testimony to
+    be admitted, but has no field through which to claim another organ's
+    identity. TestimonyRoot always names the port that proposed, never
+    payload the organ supplied."""
+    infon = form_testimony(heart.manifest.self_id)
+    result = heart.commit(infon)
+    assert result.provenance[0].organ == MIND
+    check = next(c for c in result.justification if c.rule == "EVD-7")
+    assert check.measured["candidate"] == [{"kind": "testimony", "key": "mind"}]
+    # FormInfon has no field naming a source organ at all: mode and its root
+    # are derived entirely from the roles of `inputs` and the proposing
+    # port (PRV-8), never from anything the proposal itself can spell out.
+    assert not hasattr(infon, "organ") and not hasattr(infon, "source")
+
+
+def test_a_real_root_need_not_be_relevant_evidence_at_formation(heart: Harness) -> None:
+    """E001 guarantees a root is real (it came through a capability-bound
+    port); it does not, and by design cannot, judge whether that evidence is
+    actually probative of the claim it is cited for (ROL-5). An Observation
+    about anything at all still grounds a `derivation_input` at formation.
+    The relevance boundary reached by relabeling a role at revision time is
+    case 25 in tests/test_conformance.py."""
+    weather = heart.receive(content={"topic": "weather", "reading": "sunny"})
+    unrelated_claim = FormInfon(
+        relation="R1",
+        participants=(ObjectReferent(heart.manifest.self_id),),
+        confidence=Decimal("0.6"),
+        inputs=(RoleInput(weather, Role.DERIVATION_INPUT),),
+    )
+    result = accepted(heart.propose(Consolidate(weather), unrelated_claim))
+    check = next(c for c in result.justification if c.rule == "EVD-7")
+    assert check.measured["novel"] == [{"kind": "observation", "key": weather}]

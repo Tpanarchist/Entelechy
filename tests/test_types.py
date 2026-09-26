@@ -9,6 +9,7 @@ from entelechy.foundation.types import (
     EventType,
     InfonBody,
     InfonStatus,
+    Mode,
     ObjectHeader,
     ObjectRef,
     ObjectReferent,
@@ -19,8 +20,9 @@ from entelechy.foundation.types import (
     OrganRef,
     Polarity,
     Provenance,
-    ProvenanceKind,
+    ProvenanceInput,
     RegionReferent,
+    Role,
 )
 
 
@@ -49,8 +51,11 @@ def test_header_round_trips() -> None:
 def test_provenance_round_trips() -> None:
     provenance = Provenance(
         id="prov:1",
-        kind=ProvenanceKind.DERIVATION,
-        inputs=(ObjectRef("obs:1", 1), ObjectRef("infon:2", 3)),
+        mode=Mode.DERIVATION,
+        inputs=(
+            ProvenanceInput(ObjectRef("obs:1", 1), Role.DERIVATION_INPUT),
+            ProvenanceInput(ObjectRef("infon:2", 3), Role.ATTRIBUTION),
+        ),
         operation=Operation.FORM_INFON,
         organ=OrganRef("mind", "1"),
         seed_spec=None,
@@ -60,7 +65,7 @@ def test_provenance_round_trips() -> None:
 
 
 def test_origin_provenance_names_the_seed_spec_not_an_organ() -> None:
-    provenance = Provenance("prov:0", ProvenanceKind.ORIGIN, (), None, None, "entelechy-seed/0", 0)
+    provenance = Provenance("prov:0", Mode.ORIGIN, (), None, None, "entelechy-seed/0", 0)
     assert Provenance.from_canonical(roundtrip(provenance.to_canonical())) == provenance
 
 
@@ -96,9 +101,9 @@ def test_missing_fields_are_canonical_errors() -> None:
 
 
 def test_unknown_enum_values_are_canonical_errors() -> None:
-    data = roundtrip(Provenance("p", ProvenanceKind.TESTIMONY, (), None, None, None, 1).to_canonical())
+    data = roundtrip(Provenance("p", Mode.TESTIMONY, (), None, None, None, 1).to_canonical())
     assert isinstance(data, dict)
-    data["kind"] = "dream"
+    data["mode"] = "dream"
     with pytest.raises(CanonicalError, match="unknown value"):
         Provenance.from_canonical(data)
 

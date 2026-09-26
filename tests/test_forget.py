@@ -1,15 +1,22 @@
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
-from harness import FixedRetention, Harness, policy_seed, rejected
+from harness import FixedRetention, Harness, form_testimony, policy_seed, rejected
 
+from entelechy.foundation.canonical import parse
 from entelechy.foundation.types import (
     Consolidate,
     EventType,
-    Forget,
     FormInfon,
+    Forget,
+    InfonBody,
+    InfonStatus,
     ObjectReferent,
-    ProvenanceKind,
+    ObjectType,
+    ReviseInfon,
+    Role,
+    RoleInput,
 )
 from entelechy.foundation.validator import UNIMPLEMENTED
 
@@ -89,15 +96,34 @@ def test_transient_observations_are_not_forgotten_through_forget(policy_heart: H
 
 
 def test_shared_content_survives_forgetting_one_owner(policy_heart: Harness) -> None:
-    testimony = FormInfon(
+    """Two live objects can share a body digest: an Infon's own historical
+    version, and a second Infon re-formed on the same issue with the same
+    content. Forgetting the first must not take the shared bytes with it
+    (MEM-5), even though the digest is reachable through its own lineage too.
+    """
+    testify = form_testimony(policy_heart.manifest.self_id, relation="R2", confidence=Decimal("0.6"))
+    (first_id,) = [h.id for h in policy_heart.commit(testify).versions]
+    original = policy_heart.store.latest(first_id)
+    assert original is not None
+    shared_digest = original.body_digest
+
+    retired = replace(
+        InfonBody.from_canonical(parse(policy_heart.store.content(shared_digest))),  # type: ignore[arg-type]
+        status=InfonStatus.RETIRED,
+    )
+    policy_heart.commit(ReviseInfon(first_id, 1, retired, ()))
+
+    evidence = policy_heart.receive()
+    reformed = FormInfon(
         relation="R2",
         participants=(ObjectReferent(policy_heart.manifest.self_id),),
         confidence=Decimal("0.6"),
-        provenance_kind=ProvenanceKind.TESTIMONY,
-        inputs=(),
+        inputs=(RoleInput(evidence, Role.DERIVATION_INPUT),),
     )
-    result = policy_heart.commit(testimony, testimony)
-    first, second = result.versions
-    assert first.body_digest == second.body_digest
-    policy_heart.commit(Forget(first.id, 1, "duplicate"))
-    assert policy_heart.store.content(second.body_digest) is not None
+    result = policy_heart.commit(Consolidate(evidence), reformed)
+    (second_id,) = [h.id for h in result.versions if h.type is ObjectType.INFON]
+    second = policy_heart.store.latest(second_id)
+    assert second is not None and second.body_digest == shared_digest
+
+    policy_heart.commit(Forget(first_id, 2, "retired and no longer needed"))
+    assert policy_heart.store.content(shared_digest) is not None

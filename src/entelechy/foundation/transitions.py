@@ -11,6 +11,7 @@ from entelechy.foundation.canonical import Canonical, Json
 from entelechy.foundation.types import (
     Check,
     EventRow,
+    IssueRow,
     ObjectHeader,
     ObjectRef,
     OperationEntry,
@@ -24,7 +25,7 @@ from entelechy.foundation.types import (
     field_of,
 )
 
-RECORD_SCHEMA = 1
+RECORD_SCHEMA = 2
 
 
 class RecordError(ValueError):
@@ -50,6 +51,7 @@ def build_record(
     versions: Sequence[ObjectHeader],
     events: Sequence[EventRow],
     justification: Sequence[Check],
+    issues: Sequence[IssueRow] = (),
 ) -> dict[str, Canonical]:
     """The canonical transition record (PER-6)."""
     return {
@@ -65,6 +67,7 @@ def build_record(
         "versions": [header.to_canonical() for header in versions],
         "events": [event.to_canonical() for event in events],
         "justification": [check.to_canonical() for check in justification],
+        "issues": [item.to_canonical() for item in issues],
     }
 
 
@@ -87,9 +90,13 @@ def decode_record(record: Json) -> DecodedRecord:
         EventRow.from_canonical(item)
         for item in expect_list(field_of(data, "events"), "record.events")
     )
+    issues = tuple(
+        IssueRow.from_canonical(item)
+        for item in expect_list(field_of(data, "issues"), "record.issues")
+    )
     stamped = [item.seq for item in provenance]
     stamped += [header.seq for header in versions]
     stamped += [event.seq for event in events]
     if any(item != seq for item in stamped):
         raise RecordError(f"record {seq} contains rows stamped with another seq")
-    return DecodedRecord(seq, omega_id, Rows(provenance, versions, events))
+    return DecodedRecord(seq, omega_id, Rows(provenance, versions, events, issues))
