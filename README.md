@@ -54,6 +54,18 @@ In its strongest form, Entelechy can be described as:
 
 > A persistent informational organism that converts experience into structure, structure into prediction, discrepancy into learning, and learning into increasingly effective understanding and action.
 
+## Running E000
+
+E000 is the Foundation Validator in `src/entelechy/foundation`: a kernel that lets Entelechy exist lawfully. It needs [uv](https://docs.astral.sh/uv/), which provides Python 3.14.
+
+```bash
+uv sync
+uv run pytest
+uv run mypy
+```
+
+`tests/test_kernel.py` is the E000 experiment end to end.
+
 ## Further Reading
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the layered architecture: World, Body, Mind, Heart and Ego, along with Infons, Forms, Skills, Memory, Will and Metacognition.

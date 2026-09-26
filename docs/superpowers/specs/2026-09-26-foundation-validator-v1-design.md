@@ -1,7 +1,7 @@
 # Foundation Validator v1: Design
 
 > **Status:** Approved with corrections, 2026-09-26.
-> **Implements:** a subset of [FOUNDATIONS.md](../../../FOUNDATIONS.md) draft 0.4.
+> **Implements:** a subset of [FOUNDATIONS.md](../../../FOUNDATIONS.md) draft 0.5.
 > **Experiment:** E000.
 
 ## 1. Goal
@@ -19,6 +19,9 @@ E000 is complete when the kernel can do all of the following:
 ### Non-goals
 
 Models, Predictions, Forms, Patterns, Skills, salience, Will, Manas, learning of any kind, neural dependencies, network access, async, ORMs and plugin architecture.
+
+- **Concurrency.** E000 supports exactly one writable kernel per Heart, with serial calls to `receive` and `propose`. Multi-writer concurrency is undefined and deferred.
+- **Sandboxing.** The threat model is organs that are epistemically untrusted, not hostile native code. The capability token and private attributes are architectural discipline. Code in the same process, or with access to the database file, can get around them.
 
 ---
 
@@ -71,11 +74,11 @@ src/entelechy/foundation/
     validator.py    rule checks: Proposal → AcceptedTransition | Rejection
     replay.py       ReplayCurrent, ReplayHistorical and the Heart digest
     seed.py         seed specification and origin creation
-    kernel.py       the facade organs use; owns the store privately
+    kernel.py       the kernel and the ports organs act through; owns the store privately
 tests/
 ```
 
-`kernel.py` is an addition to the seven modules in the original proposal. It is the one object an organ can hold, and it exposes no store.
+`kernel.py` is an addition to the seven modules in the original proposal. The host holds the Kernel; each organ holds only the port bound to it (§6.4). Neither exposes a store.
 
 ---
 
@@ -86,8 +89,10 @@ tests/
 Every persistent structure has exactly one byte representation before it is hashed.
 
 - **Encoding:** JSON, UTF-8, keys sorted by code point, separators `,` and `:`, no insignificant whitespace, `ensure_ascii=False`.
-- **Allowed values:** `null`, booleans, integers, strings, arrays, and objects with string keys.
-- **Floats are forbidden.** Float formatting is where hash drift comes from. Non-integer quantities such as confidence are `decimal.Decimal` and are encoded as a normalized fixed-point string such as `"0.8"`. They are decoded by field type.
+- **Allowed values:** `null`, booleans, integers, strings, arrays, and objects with string keys. Nothing else, so distinct values never share bytes.
+- **Floats are forbidden.** Float formatting is where hash drift comes from.
+- **Decimals belong to typed schemas.** Non-integer quantities such as confidence are `decimal.Decimal`. The generic encoder refuses them; the typed schema that owns the field writes it as a normalized fixed-point string such as `"0.8"` and decodes it by field. If the generic encoder accepted Decimals, `Decimal("0.8")` and the string `"0.8"` would share one encoding.
+- **Decimal text is exact and bounded.** It is built from the Decimal's own digits, so it never rounds and does not depend on the process's decimal context. Text longer than 100 characters is refused, and a value that cannot be encoded is rejected before anything is stored.
 - **Dates and times are rejected by the encoder** (SEQ-3).
 - Every encoded structure carries `type` and `schema` fields.
 
@@ -154,7 +159,7 @@ Origin is not a transition. Lineage starts at `seq` 1.
 
 A proposal contains:
 
-- `organ`: the proposing organ's id and version,
+- `organ`: the proposing organ's id and version, filled in by the organ's port, never by the organ (ORG-6),
 - `operations`: an ordered list, applied atomically as one transition (PER-9),
 - `reason`: the proposer's own free-text account, recorded but never trusted.
 
@@ -211,19 +216,25 @@ REJECTED
 
 Any exception rolls back the whole transaction (PER-5).
 
-### 6.4 Kernel API
+### 6.4 Kernel API and Ports
 
-This is the only surface an organ touches.
+The host that wires Entelechy together holds the Kernel. Organs never do: each organ holds only the port the host gives it. Identity comes from which port delivered something, never from data the organ supplies (FOUNDATIONS ORG-6).
 
 ```text
-Kernel.create(path, seed_spec) → Kernel
+Kernel.create(path, seed_spec, policies) → Kernel
 Kernel.open(path, policies)    → Kernel        runs ReplayCurrent; refuses to open on mismatch
-kernel.receive(channel, content, identifiers) → ObservationRef
-kernel.propose(proposal)       → Accepted(seq, events) | Rejection
+kernel.body_channel(channel)   → BodyChannel   for one registered Body channel
+kernel.organ(organ)            → OrganPort     for one registered Mind organ
 kernel.heart                   → read-only HeartView
 kernel.replay_current()        → HeartDigest
 kernel.replay_historical(seq)  → HeartView
+
+body_channel.receive(content, identifiers) → ObservationRef
+organ_port.propose(*operations, reason)    → Accepted(seq, events, created) | Rejection
+organ_port.heart                           → read-only HeartView
 ```
+
+A Mind organ therefore has no way to deliver an Observation, and no way to propose under another organ's name. Asking for a Body channel port for a Mind organ, or an organ port for a Body channel, is refused under ORG-6. Asking for a port for anything unregistered is refused under ORG-2.
 
 `Kernel.open` replays the whole lineage and compares it with the materialized Heart before accepting any proposal. In v1 lineage is tiny, and this wake-up check is the most direct test of Law 7.
 
@@ -238,7 +249,7 @@ kernel.replay_historical(seq)  → HeartView
 | Replay | RPL-1 to RPL-4 | Shared `apply`, digest-addressed content, content-deletion trigger, `CONTENT_FORGOTTEN` stubs in historical replay. |
 | Identity | OMG-1, OMG-2, OMG-5 | Immutable `origin`, append-only lineage, wake-up replay. |
 | Provenance | PRV-1 to PRV-7 | Every object version has provenance. Inputs must be persistent. `origin` is only assigned by `create`. No operation changes provenance. |
-| Organs | ORG-1, ORG-2 | The proposing organ must be registered in the manifest at the stated version. |
+| Organs | ORG-1, ORG-2, ORG-6 | Ports exist only for registered organs and channels, each bound to one identity. The validator also checks that the proposing organ is registered. |
 | Objects | OBJ-1 to OBJ-4 | Shared header. `ReviseInfon` diffs the proposed body against the current one. |
 | Referents | REF-1 to REF-3 | Each participant is an object id, an Observation region, or an opaque identifier listed in a persisted Observation's `identifiers`. |
 | Observations | OBS-1, OBS-3 | No operation edits an Observation. `received_seq` is assigned at receipt. OBS-2 is satisfied by the stricter V1-CERTAINTY. |
@@ -265,7 +276,7 @@ Some things FOUNDATIONS permits, v1 cannot yet check. v1 rejects them under its 
 - **Context:** stored as an opaque canonical map in v1. The validator does not interpret it.
 - **Provenance kinds:** v1 accepts `observation`, `testimony`, `derivation` and `self-observation`.
 - **PRV-3:** acyclicity is structural. Inputs must already exist, so a new object can never be its own input.
-- **REVISE_INFON:** v1 requires at least one evidence input that is not already in the Infon's prior provenance.
+- **REVISE_INFON:** the revised version's `derivation` provenance cites the version it revises and the new evidence. At least one evidence input must be new, judged per `(id, version)`, and an Infon is never evidence for its own revision.
 
 ### Memory specifics
 
@@ -330,7 +341,8 @@ This differs from the lifecycle in the original proposal, where `CONSOLIDATE O1`
 | A transition fails partway | Fault injection mid-commit leaves no rows (PER-5). |
 | Changing an Infon's relation through `ReviseInfon` | Rejected: INF-4 and OBJ-4. A successor is required. |
 | Removing an object with raw `DELETE` | The trigger aborts. |
-| A proposal from an unregistered organ | Rejected: ORG-2 |
+| A proposal from an unregistered organ | The kernel refuses to make a port for it: `KernelError` citing ORG-2. The validator also rejects such a proposal under ORG-2. |
+| A Mind organ delivering an Observation, or a Body channel proposing | The kernel refuses the port: `KernelError` citing ORG-6. |
 | A relation outside the vocabulary | Rejected: INF-1 |
 | Confidence 0 or 1 | Rejected: `V1-CERTAINTY` |
 | `Forget` on the Self Map's self-reference | Rejected: MEM-4 |
@@ -352,7 +364,7 @@ A tampering test edits a transition record's bytes directly in the database file
 
 These are choices I made that the design discussion did not settle.
 
-1. `kernel.py` is added as the organ-facing facade.
+1. `kernel.py` is added to hold the Kernel and the ports organs act through.
 2. Floats are forbidden in canonical content, and confidence is a `Decimal`.
 3. Objects are split into a header, which is never forgotten, and a content-addressed body, which `FORGET` can remove. Every version is immutable.
 4. Content is deduplicated by digest, and a trigger stops one `FORGET` from deleting a body that another live object still shares.
@@ -374,4 +386,6 @@ These gaps were found while designing and are resolved in FOUNDATIONS 0.4:
 
 ## 12. Recorded, Not Blocking
 
+- **Creating a Heart.** `Kernel.create` builds the Heart under a temporary name in the same directory, closes it, and publishes it with a hard link, which refuses an existing target. A failure before publication leaves nothing at the target path. The no-overwrite behaviour is tested on Windows (NTFS) only; POSIX `link(2)` gives the same refusal but is untested here, and a filesystem without hard links cannot create Hearts. Durability against power loss beyond SQLite's own guarantees is a later systems concern.
+- **Secure forgetting (OPEN-16).** `FORGET` in v1 is logical forgetting (MEM-6). Retained digests let someone confirm a guess, so low-entropy forgotten content can still be recovered by guessing. Secure erasure would cost content addressing and deduplication, and is deferred.
 - **Implementation identity (OPEN-15).** v1 identifies organs and retention policies by name and version only. A label does not prove that tomorrow's code called version 1 is the same code. A later version should identify executable components by artifact digest, $\langle name,\ version,\ digest \rangle$.

@@ -1,6 +1,6 @@
 # Entelechy Foundations
 
-> **Status:** Draft 0.4, 2026-09-26. Normative. Changes between drafts are listed in §18.
+> **Status:** Draft 0.5, 2026-09-26. Normative. Changes between drafts are listed in §18.
 
 [README.md](README.md) says what Entelechy is. [ARCHITECTURE.md](ARCHITECTURE.md) explains how its parts fit together. This document says what an implementation MUST, MAY and MUST NOT do. It is written so that each rule can become an assertion, a validator check or a test.
 
@@ -83,6 +83,8 @@ $$
 It is authoritative for structure, identity, transitions, digests, provenance and history. The content store supplies only the bytes, and every byte string is checked against the digest lineage recorded for it.
 
 Lineage alone cannot reconstruct every byte, and it must not. Entelechy cannot both keep every byte in immutable lineage and let `FORGET` remove bytes permanently. If forgotten bytes survived anywhere in lineage, they were never forgotten.
+
+This forgetting is logical, not secure erasure (MEM-6). Lineage keeps each body's digest, and a digest lets someone confirm a guess, so sufficiently low-entropy content can still be recovered by guessing. Secure forgetting is OPEN-16.
 
 If Entelechy holds a belief and we ask why, its developmental path to that belief can be reconstructed transition by transition.
 
@@ -240,6 +242,15 @@ Organs are the replaceable machinery through which Entelechy perceives, computes
 - **ORG-3** Content an organ supplies from its own pretraining, rather than from Entelechy's experience, MUST carry `testimony` provenance naming that organ. This keeps knowledge inherited from a pretrained model distinguishable from knowledge Entelechy learned.
 - **ORG-4** Language is a codec. When someone says $X$, the fact that they said it MAY be committed as an `observation`, but $X$ itself MUST enter as `testimony` attributed to the speaker. It MUST NOT be committed as an observation of the world.
 - **ORG-5** An organ's internal parameters, such as neural weights, are organ state, not Heart state, and MAY change during training. Putting a new organ version into service is a `CHANGE_ORGAN` transition. Its provenance MUST reference the experience the organ was trained on. Existing Models are not affected (MOD-12).
+- **ORG-6**
+
+  $$
+  \boxed{\text{Authority-bearing identity comes from capability, not payload.}}
+  $$
+
+  The identity an organ or Body channel acts under MUST be established by the interface it acts through, never by data it supplies. A Body channel delivers Observations only through a port bound to that channel, and a Mind organ proposes only through a port bound to that organ.
+
+  What a port authenticates is identity: which channel delivered an Observation, and which organ proposed a transition. It does not authenticate claims inside the payload. The provenance kind of an Infon, for example, remains a claim attributed to the authenticated organ (ORG-3, ORG-4), not a verified fact. What ORG-6 guarantees is that an organ which is not a Body channel has no way to deliver an Observation, and no way to propose under another organ's name.
 
 ---
 
@@ -565,6 +576,7 @@ Different information earns different persistence. Forgetting is compression, no
 
   Content can be retired; the record of it cannot, and neither can the evidence a live status depends on.
 - **MEM-5** `FORGET` MAY retire the content of an object that active commitments cite as provenance. The lineage stub satisfies PRV-4.
+- **MEM-6** `FORGET` removes body content from Entelechy's managed content store and from its active epistemic state. It does not guarantee cryptographic or information-theoretic erasure: digests and other retained metadata may permit confirmation or reconstruction of sufficiently low-entropy content.
 
 ---
 
@@ -651,6 +663,7 @@ Every parameter is **unbound**. None has a value until experiment determines one
 - **OPEN-13** May a mature Manas propose amendments to this document, and through what process?
 - **OPEN-14** How should explicit ignorance be represented? The current direction is that it should be representable, but not as an Infon polarity. "I don't know whether $R$" and "I have investigated $R$ and lack sufficient evidence" are positive facts about Entelechy's own epistemic state, as distinct from the bare absence of an Infon (INF-5). A candidate is an `EpistemicGap` or `Question` object, $G = \langle query,\ context,\ attemptedEvidence,\ status \rangle$, with statuses such as `open`, `investigating`, `resolved` and `unresolvable`.
 - **OPEN-15** How is the implementation of an executable component, such as an organ or a retention policy, identified immutably? A name and version label do not prove that tomorrow's code called version 1 is the same code. A candidate is $implementation = \langle name,\ version,\ digest \rangle$, where `digest` identifies the artifact itself.
+- **OPEN-16** Should Entelechy be able to forget securely, so that no surviving artifact permits recovery or confirmation of the forgotten content? MEM-6 guarantees only logical forgetting. Secure forgetting would need something like a per-body random nonce destroyed with the body, which costs deduplication and must be reconciled with RPL-3's auditable digests.
 
 ---
 
@@ -670,6 +683,12 @@ This translates directly into code:
 ---
 
 ## 18. Change Log
+
+### 0.5
+
+- **Capability law.** New ORG-6: authority-bearing identity comes from capability, not payload. Body channels and Mind organs act only through ports bound to their identity.
+- **Logical forgetting.** New MEM-6, with a matching note under Law 7: `FORGET` is logical forgetting, not secure erasure.
+- **Secure forgetting.** New OPEN-16.
 
 ### 0.4
 
