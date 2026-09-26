@@ -68,6 +68,12 @@ CERTAINTY = "V1-CERTAINTY"
 
 _CAPABILITY = object()
 
+# ROL-2's "Allowed in" column: which roles an organ may use for each
+# operation. `revision_target` is never here — the validator adds it, an
+# organ never proposes it (ROL-3).
+FORM_INFON_ALLOWED_ROLES = frozenset({Role.DERIVATION_INPUT, Role.ATTRIBUTION})
+REVISE_INFON_ALLOWED_ROLES = frozenset({Role.SUPPORT, Role.COUNTEREVIDENCE, Role.ATTRIBUTION})
+
 
 class RetentionPolicy(Protocol):
     """The retention function f (OPEN-5). Declared in the seed; there is no default."""
@@ -409,7 +415,7 @@ class Validator:
         for referent in op.participants:
             violations += self._referent(referent, work)
         for item in op.inputs:
-            if item.role not in (Role.DERIVATION_INPUT, Role.ATTRIBUTION):
+            if item.role not in FORM_INFON_ALLOWED_ROLES:
                 violations.append(
                     Violation(
                         "ROL-3",
@@ -425,13 +431,7 @@ class Validator:
         if violations:
             return violations
 
-        # PRV-8: mode is derived from the roles present, never supplied by the organ.
-        if not resolved:
-            mode = Mode.TESTIMONY
-        elif all(item.role is Role.ATTRIBUTION for item in resolved):
-            mode = Mode.ATTRIBUTED
-        else:
-            mode = Mode.DERIVATION
+        mode = _formation_mode(resolved)
 
         issue = issue_digest(op.relation, op.participants, op.context)
         classification = classify(issue, work)
@@ -614,7 +614,7 @@ class Validator:
         # ROL-3: revision may cite support, counterevidence and attribution;
         # revision_target is added below, by the validator, never by an organ.
         for item in op.evidence:
-            if item.role not in (Role.SUPPORT, Role.COUNTEREVIDENCE, Role.ATTRIBUTION):
+            if item.role not in REVISE_INFON_ALLOWED_ROLES:
                 violations.append(
                     Violation(
                         "ROL-3",
@@ -648,19 +648,15 @@ class Validator:
         issue = work.issue_of(header.id)
         assert issue is not None, "every committed Infon was formed with an issue (INF-7)"
         inherited = ledger(issue, work)
-        support = tuple(item.ref for item in resolved if item.role is Role.SUPPORT)
-        counterevidence = tuple(item.ref for item in resolved if item.role is Role.COUNTEREVIDENCE)
+        support, counterevidence = _evidence_by_direction(resolved)
 
         # EVD-5: an administrative change (a move to retired with confidence
         # unchanged) needs no evidence and must not admit any.
-        is_administrative = op.body.status is InfonStatus.RETIRED and direction is None
+        is_administrative = _is_administrative_change(op.body.status, direction)
         if is_administrative:
-            if support or counterevidence:
-                return [
-                    Violation(
-                        "EVD-5", "an administrative change must not admit support or counterevidence"
-                    )
-                ]
+            violation = _administrative_evidence_violation(support, counterevidence)
+            if violation is not None:
+                return [violation]
             candidate: frozenset[Root] = frozenset()
             novel: frozenset[Root] = frozenset()
             classification = "administrative"
@@ -810,6 +806,38 @@ def _certainty(confidence: Decimal) -> list[Violation]:
 
 def _field_bytes(body: InfonBody) -> dict[str, bytes]:
     return {name: canonical_bytes(value) for name, value in body.to_canonical().items()}
+
+
+def _administrative_evidence_violation(
+    support: tuple[ObjectRef, ...], counterevidence: tuple[ObjectRef, ...]
+) -> Violation | None:
+    """EVD-5: an administrative change must not admit support or counterevidence."""
+    if support or counterevidence:
+        return Violation("EVD-5", "an administrative change must not admit support or counterevidence")
+    return None
+
+
+def _formation_mode(resolved: Sequence[ProvenanceInput]) -> Mode:
+    """PRV-8: mode is derived from the roles present, never supplied by the organ."""
+    if not resolved:
+        return Mode.TESTIMONY
+    if all(item.role is Role.ATTRIBUTION for item in resolved):
+        return Mode.ATTRIBUTED
+    return Mode.DERIVATION
+
+
+def _is_administrative_change(status: InfonStatus, direction: str | None) -> bool:
+    """EVD-5: a move to retired with confidence unchanged needs no evidence."""
+    return status is InfonStatus.RETIRED and direction is None
+
+
+def _evidence_by_direction(
+    resolved: Sequence[ProvenanceInput],
+) -> tuple[tuple[ObjectRef, ...], tuple[ObjectRef, ...]]:
+    """Split a revision's resolved evidence into its support and counterevidence."""
+    support = tuple(item.ref for item in resolved if item.role is Role.SUPPORT)
+    counterevidence = tuple(item.ref for item in resolved if item.role is Role.COUNTEREVIDENCE)
+    return support, counterevidence
 
 
 def _missing(rule: str, role: str, object_id: str, work: _Work) -> Violation:

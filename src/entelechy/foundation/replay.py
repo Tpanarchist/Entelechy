@@ -4,7 +4,7 @@ ReplayCurrent(Origin, Lineage, ContentStore_live) = Heart_current.
 Origin and lineage rebuild structure; the live content store supplies bytes.
 """
 
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 
 from entelechy.foundation.canonical import CanonicalError, Json, digest_of, parse, verify
 from entelechy.foundation.evidence import (
@@ -140,9 +140,17 @@ def _audit_and_apply(record: Json, rows: Rows, reader: Store) -> None:
         operation_entry = expect_object(operation_entry_raw, "operations[i]")
         operation_name = _text(operation_entry, "operation")
         object_id = _text(operation_entry, "object")
-        version = next(versions)
-        this_provenance = None if operation_name == "FORGET" else next(provenance)
-        this_issue = next(issues) if operation_name == "FORM_INFON" else None
+        version = _next_row(versions, op_index, operation_name, "version")
+        this_provenance = (
+            None
+            if operation_name == "FORGET"
+            else _next_row(provenance, op_index, operation_name, "provenance")
+        )
+        this_issue = (
+            _next_row(issues, op_index, operation_name, "IssueRow")
+            if operation_name == "FORM_INFON"
+            else None
+        )
 
         # EVD-7: a FORM_INFON or REVISE_INFON MUST carry exactly one check;
         # every other operation MUST carry none. A deleted or duplicated
@@ -220,7 +228,36 @@ def _audit_and_apply(record: Json, rows: Rows, reader: Store) -> None:
         raise IntegrityError(
             f"EVD-7 checks reference operations that do not exist: {sorted(justification_by_op)}"
         )
+    # Every row a transition carries must be consumed by exactly one
+    # operation (RPL-1): lineage is replayed exactly, not partially. An
+    # extra row a forged record smuggled in — one no operation's cardinality
+    # check above would catch, since it never has to be `next()`-ed — must
+    # not simply be dropped on the floor.
+    _require_exhausted(versions, "versions")
+    _require_exhausted(provenance, "provenance")
+    _require_exhausted(issues, "issues")
     reader.apply_replayed(Rows(provenance=(), versions=(), events=rows.events, issues=()))
+
+
+class _Sentinel:
+    pass
+
+
+_MISSING = _Sentinel()
+
+
+def _next_row[T](rows: Iterator[T], op_index: int, operation_name: str, kind: str) -> T:
+    value = next(rows, _MISSING)
+    if isinstance(value, _Sentinel):
+        raise IntegrityError(
+            f"operation {op_index} ({operation_name}) has no {kind} row left to apply"
+        )
+    return value
+
+
+def _require_exhausted(rows: Iterator[object], name: str) -> None:
+    if not isinstance(next(rows, _MISSING), _Sentinel):
+        raise IntegrityError(f"transition record carries more {name} rows than its operations use")
 
 
 def _audit_iss3(reader: Store) -> None:
@@ -297,28 +334,27 @@ class HeartView:
         return [h for h in latest.values() if object_type is None or h.type is object_type]
 
     def body(self, object_id: str, version: int | None = None) -> Json | Stub | None:
-        """The PER-8 read path: any prior version, not only the latest."""
+        """The PER-8 read path: any prior version, not only the latest.
+
+        Whether this object's content is logically forgotten is a fact
+        about the object (its latest version's `forgotten` flag, which is
+        permanent once set — MEM-3), never about which version happens to
+        be requested. A historical version's bytes are purged only because
+        FORGET purges every digest the object ever used; asking for a
+        historical version of an object that was never forgotten and
+        finding its content missing is corruption, and must still raise.
+        """
         if version is None:
             header = self.latest(object_id)
-            missing_is_stub = False
         else:
             header = self._structure.header_at(ObjectRef(object_id, version))
-            missing_is_stub = True
         if header is None:
             return None
-        if header.forgotten or object_id in self._forgotten_later:
+        latest = header if version is None else self.latest(object_id)
+        if (latest is not None and latest.forgotten) or object_id in self._forgotten_later:
             return Stub.CONTENT_FORGOTTEN
         data = self._content.content(header.body_digest)
-        if data is None:
-            # A historical (non-latest) version's own header never gets
-            # `forgotten` set — only the version FORGET itself produced does
-            # (MEM-3) — yet FORGET purges every digest that version ever
-            # used (unless another live object still needs it). Missing
-            # content here is that, not corruption.
-            if missing_is_stub:
-                return Stub.CONTENT_FORGOTTEN
-            raise IntegrityError(f"content of {object_id} is missing or altered")
-        if not verify(data, header.body_digest):
+        if data is None or not verify(data, header.body_digest):
             raise IntegrityError(f"content of {object_id} is missing or altered")
         return parse(data)
 

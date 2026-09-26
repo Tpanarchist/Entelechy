@@ -231,6 +231,27 @@ def test_heart_view_body_stubs_a_purged_historical_version(policy_heart: Harness
     assert view.body(infon_id) is Stub.CONTENT_FORGOTTEN
 
 
+def test_heart_view_body_raises_on_unforgotten_missing_content(heart: Harness) -> None:
+    """A historical version's content going missing is a stub only when the
+    object was actually forgotten (its latest version's `forgotten` flag,
+    MEM-3). A live, never-forgotten object whose v1 bytes vanish some other
+    way is corruption, and must still raise IntegrityError — the version
+    requested does not by itself make missing content look forgotten.
+    """
+    _, infon_id = heart.lifecycle()
+    evidence = heart.receive()
+    body = replace(infon_body(heart.store, infon_id), confidence=Decimal("0.9"))
+    heart.commit(
+        Consolidate(evidence), ReviseInfon(infon_id, 1, body, (RoleInput(evidence, Role.SUPPORT),))
+    )
+    v1 = heart.store.header_at(ObjectRef(infon_id, 1))
+    assert v1 is not None
+    tamper(heart.path, ("content_delete_only_forgotten",), "DELETE FROM content WHERE digest = ?", (v1.body_digest,))
+    view = HeartView(heart.store)
+    with pytest.raises(IntegrityError, match="missing or altered"):
+        view.body(infon_id, version=1)
+
+
 def _forge_evd7_field(record: bytes, field_name: str, value: Json) -> bytes:
     data = parse(record)
     assert isinstance(data, dict)
@@ -302,6 +323,52 @@ def test_a_deleted_evd7_check_does_not_survive_replay(heart: Harness) -> None:
     )
     with pytest.raises(IntegrityError, match="exactly one"):
         replay_current(heart.store)
+
+
+def test_a_form_infon_with_no_issue_row_is_refused_not_raised_as_stopiteration(
+    heart: Harness,
+) -> None:
+    """A FORM_INFON with its IssueRow stripped out must fail with a clear
+    IntegrityError, not a bare StopIteration from an exhausted iterator."""
+    heart.lifecycle()
+    ((seq, record, _),) = heart.store.transitions()
+    data = parse(record)
+    assert isinstance(data, dict)
+    data["issues"] = []
+    forged = canonical_bytes(data)
+    tamper(
+        heart.path,
+        ("transitions_no_update",),
+        "UPDATE transitions SET record = ?, record_digest = ? WHERE seq = ?",
+        (forged, digest(forged), seq),
+    )
+    with pytest.raises(IntegrityError, match="no IssueRow row left to apply"):
+        rebuild(heart.store)
+
+
+def test_an_extra_issue_row_not_consumed_by_any_operation_is_refused(heart: Harness) -> None:
+    """Every row a transition carries must be consumed by exactly one
+    operation (RPL-1). An extra `issues` row a forged, consistently
+    re-digested record smuggles in has no operation to be `next()`-ed
+    against, so no per-operation cardinality check catches it on its own;
+    replay must still refuse rather than silently drop it.
+    """
+    heart.lifecycle()
+    ((seq, record, _),) = heart.store.transitions()
+    data = parse(record)
+    assert isinstance(data, dict)
+    issues = data["issues"]
+    assert isinstance(issues, list)
+    issues.append({"object": "infon:phantom", "issue": "sha256:" + "9" * 64})
+    forged = canonical_bytes(data)
+    tamper(
+        heart.path,
+        ("transitions_no_update",),
+        "UPDATE transitions SET record = ?, record_digest = ? WHERE seq = ?",
+        (forged, digest(forged), seq),
+    )
+    with pytest.raises(IntegrityError, match="more issues rows"):
+        rebuild(heart.store)
 
 
 def test_a_tampered_live_infon_issues_row_is_detected(heart: Harness) -> None:
