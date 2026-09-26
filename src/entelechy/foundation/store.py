@@ -12,7 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from entelechy.foundation.canonical import canonical_bytes, verify
+from entelechy.foundation.canonical import canonical_bytes, digest, parse, verify
+from entelechy.foundation.transitions import build_record, decode_record
 from entelechy.foundation.types import (
     EventRow,
     EventType,
@@ -25,6 +26,7 @@ from entelechy.foundation.types import (
     ProvenanceKind,
     Rows,
 )
+from entelechy.foundation.validator import AcceptedTransition
 
 SCHEMA_VERSION = "1"
 
@@ -173,6 +175,18 @@ _VERSION_COLUMNS = (
     "object_id, version, type, provenance_id, derived_from, created_seq, seq, "
     "retired_by, forgotten, body_digest"
 )
+
+_DELETE_UNSHARED_CONTENT = """
+DELETE FROM content WHERE digest = :digest AND NOT EXISTS (
+    SELECT 1 FROM object_versions AS v
+    WHERE v.body_digest = :digest
+      AND NOT EXISTS (
+          SELECT 1 FROM object_versions AS f
+          WHERE f.object_id = v.object_id AND f.forgotten = 1
+      )
+)
+"""
+
 
 class StoreError(Exception):
     """The database is missing, already exists, or is not an intact Entelechy Heart."""
@@ -327,6 +341,36 @@ class Store:
         with self._transaction():
             self._insert_rows(rows)
 
+    def commit(self, accepted: AcceptedTransition, omega_id: str) -> None:
+        """Persist one accepted transition atomically (PER-5)."""
+        if not isinstance(accepted, AcceptedTransition):
+            raise TypeError("only an AcceptedTransition from the validator can be committed")
+        record = canonical_bytes(
+            build_record(
+                seq=accepted.seq,
+                omega_id=omega_id,
+                proposer=accepted.proposal.organ,
+                reason=accepted.proposal.reason,
+                operations=accepted.operations,
+                prior=accepted.prior,
+                provenance=accepted.provenance,
+                versions=accepted.versions,
+                events=accepted.events,
+                justification=accepted.justification,
+            )
+        )
+        with self._transaction():
+            self._conn.execute(
+                "INSERT INTO transitions (seq, record, record_digest) VALUES (?, ?, ?)",
+                (accepted.seq, record, digest(record)),
+            )
+            # Apply from the recorded bytes, exactly as replay will (RPL-1).
+            self._insert_rows(decode_record(parse(record)).rows)
+            self._insert_contents(accepted.bodies)
+            self._delete_forgotten_content(
+                header.id for header in accepted.versions if header.forgotten
+            )
+
     def _insert_rows(self, rows: Rows) -> None:
         self._insert_provenance(rows.provenance)
         self._insert_versions(rows.versions)
@@ -398,6 +442,18 @@ class Store:
                 "INSERT OR IGNORE INTO content (digest, body) VALUES (?, ?)",
                 (body_digest, body),
             )
+
+    def _delete_forgotten_content(self, object_ids: Iterable[str]) -> None:
+        for object_id in object_ids:
+            digests = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT DISTINCT body_digest FROM object_versions WHERE object_id = ?",
+                    (object_id,),
+                )
+            ]
+            for body_digest in digests:
+                self._conn.execute(_DELETE_UNSHARED_CONTENT, {"digest": body_digest})
 
     # Reads
 

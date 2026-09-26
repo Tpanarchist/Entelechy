@@ -11,6 +11,7 @@ from entelechy.foundation.canonical import Json, digest, parse
 from entelechy.foundation.seed import PolicyRef, SeedSpec, manifest_for, seed_heart
 from entelechy.foundation.store import Store
 from entelechy.foundation.types import (
+    Consolidate,
     FormInfon,
     InfonBody,
     ObjectType,
@@ -99,6 +100,20 @@ class Harness:
     ) -> AcceptedTransition | Rejection:
         seq = self.store.allocate_seq()
         return self.validator.validate(Proposal(organ, operations), seq, self.store, self.transient)
+
+    def commit(self, *operations: ProposedOperation) -> AcceptedTransition:
+        result = accepted(self.propose(*operations))
+        self.store.commit(result, OMEGA)
+        for entry in result.operations:
+            self.transient.pop(entry.object_id, None)
+        return result
+
+    def lifecycle(self, content: Json = "red") -> tuple[str, str]:
+        """Commit the first lifecycle; return the Observation and Infon ids."""
+        observation = self.receive(content)
+        result = self.commit(Consolidate(observation), infon_from(observation))
+        (infon_id,) = [header.id for header in result.versions if header.id != observation]
+        return observation, infon_id
 
     def raw(self) -> sqlite3.Connection:
         """A second, ordinary connection: what anyone with the file could do."""
