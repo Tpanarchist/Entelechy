@@ -70,8 +70,27 @@ def test_seed_heart_is_rebuilt_exactly_from_the_manifest_dev2() -> None:
         (SeedSpec(("R1",), (EYE,), (MIND,), theta_retain=Decimal("1.5")), "theta_retain"),
         (SeedSpec(("R1",), (EYE,), (MIND,), theta_forget=Decimal("NaN")), "theta_forget"),
         (SeedSpec(("R1",), (EYE,), (MIND,), theta_retain=Decimal("1E-200")), "theta_retain"),
+        (SeedSpec(("R\udcff",), (EYE,), (MIND,)), "canonical form"),
+        (SeedSpec(("R1",), (OrganRef("eye", "\udcff"),), (MIND,)), "canonical form"),
+        (
+            SeedSpec(("R1",), (EYE,), (MIND,), retention_policy=PolicyRef("fixed\udcff", "1")),
+            "canonical form",
+        ),
     ],
 )
 def test_invalid_seeds_are_refused(spec: SeedSpec, message: str) -> None:
     with pytest.raises(SeedError, match=message):
+        manifest_for(spec, "omega-1")
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        SeedSpec((1,), (EYE,), (MIND,)),  # type: ignore[arg-type]
+        SeedSpec(("R1",), (EYE,), (OrganRef("mind", 1),)),  # type: ignore[arg-type]
+    ],
+    ids=["int-relation", "int-version"],
+)
+def test_a_seed_that_does_not_survive_encoding_is_refused_dev2(spec: SeedSpec) -> None:
+    with pytest.raises(SeedError, match="canonical form"):
         manifest_for(spec, "omega-1")

@@ -163,7 +163,7 @@ def check_seed(spec: SeedSpec) -> None:
 
 def manifest_for(spec: SeedSpec, omega_id: str) -> Manifest:
     check_seed(spec)
-    return Manifest(
+    manifest = Manifest(
         omega_id=omega_id,
         spec_version=SEED_SPEC_VERSION,
         relations=spec.relations,
@@ -173,6 +173,15 @@ def manifest_for(spec: SeedSpec, omega_id: str) -> Manifest:
         theta_forget=spec.theta_forget,
         retention_policy=spec.retention_policy,
     )
+    # The manifest must rebuild exactly from its own bytes (DEV-2), so every
+    # field is checked here, before anything is written anywhere.
+    try:
+        rebuilt = Manifest.from_bytes(manifest.to_bytes())
+    except CanonicalError as error:
+        raise SeedError(f"the seed has no canonical form: {error}") from error
+    if rebuilt != manifest:
+        raise SeedError("the seed has no canonical form: it does not survive encoding")
+    return manifest
 
 
 def seed_heart(manifest: Manifest) -> tuple[Rows, dict[str, bytes]]:

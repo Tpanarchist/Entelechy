@@ -129,12 +129,22 @@ class Kernel:
     def create(
         cls, path: Path, seed: SeedSpec, policies: Sequence[RetentionPolicy] = ()
     ) -> Kernel:
+        # Everything that can fail is worked out before the file exists.
         manifest = manifest_for(seed, str(uuid.uuid4()))
         policy = _resolve_policy(manifest.retention_policy, policies)
-        store = Store.create(path)
         rows, contents = seed_heart(manifest)
         manifest_bytes = manifest.to_bytes()
-        store.write_origin(manifest.omega_id, manifest_bytes, digest(manifest_bytes), rows, contents)
+        store = Store.create(path)
+        try:
+            store.write_origin(
+                manifest.omega_id, manifest_bytes, digest(manifest_bytes), rows, contents
+            )
+        except BaseException:
+            # A Heart without an origin can never be opened; leave nothing behind.
+            store.close()
+            for suffix in ("", "-wal", "-shm"):
+                path.with_name(path.name + suffix).unlink(missing_ok=True)
+            raise
         return cls(store, path, manifest, policy)
 
     @classmethod

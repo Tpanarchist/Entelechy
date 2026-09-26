@@ -12,7 +12,7 @@ from harness import EYE, MIND, FixedRetention, infon_from, plain_seed, policy_se
 from entelechy.foundation.canonical import CanonicalError, Json, parse
 from entelechy.foundation.kernel import Accepted, BodyChannel, Kernel, KernelError, OrganPort
 from entelechy.foundation.replay import IntegrityError
-from entelechy.foundation.seed import SeedSpec
+from entelechy.foundation.seed import SeedError, SeedSpec
 from entelechy.foundation.store import Store, StoreError
 from entelechy.foundation.types import (
     Consolidate,
@@ -98,15 +98,22 @@ def test_each_port_acts_only_as_its_own_identity_org6(tmp_path: Path) -> None:
     seed = SeedSpec(relations=("R1",), channels=(EYE, ear), organs=(MIND, scribe))
     path = tmp_path / "heart.db"
     with Kernel.create(path, seed) as kernel:
-        heard = kernel.body_channel(ear).receive("hello")
-        seen = kernel.body_channel(EYE).receive("red")
-        by_scribe = ok(kernel.organ(scribe).propose(Consolidate(heard), infon_from(heard)))
-        by_mind = ok(kernel.organ(MIND).propose(Consolidate(seen), infon_from(seen)))
+        # Wire every port up front, as a host would, then use them in an order
+        # unrelated to the order they were made in, reusing one of each kind.
+        eye_port, ear_port = kernel.body_channel(EYE), kernel.body_channel(ear)
+        mind_port, scribe_port = kernel.organ(MIND), kernel.organ(scribe)
+        heard = ear_port.receive("hello")
+        seen = eye_port.receive("red")
+        heard_again = ear_port.receive("again")
+        by_mind = ok(mind_port.propose(Consolidate(seen), infon_from(seen)))
+        by_scribe = ok(scribe_port.propose(Consolidate(heard), infon_from(heard)))
+        by_mind_again = ok(mind_port.propose(Consolidate(heard_again), infon_from(heard_again)))
     reader = Store.open_readonly(path)
     records = {seq: parse(record) for seq, record, _ in reader.transitions()}
     for observation, channel, accepted, organ in (
         (heard, ear, by_scribe, scribe),
         (seen, EYE, by_mind, MIND),
+        (heard_again, ear, by_mind_again, MIND),
     ):
         observed = reader.latest(observation)
         assert observed is not None
@@ -380,6 +387,27 @@ def test_create_refuses_a_seed_whose_policy_is_missing_and_writes_nothing(tmp_pa
     with pytest.raises(KernelError, match="fixed@1"):
         Kernel.create(path, policy_seed())
     assert not path.exists()
+
+
+def test_create_with_an_unencodable_seed_writes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "heart.db"
+    with pytest.raises(SeedError):
+        Kernel.create(path, SeedSpec(("R\udcff",), (EYE,), (MIND,)))
+    assert not path.exists()
+
+
+def test_a_failed_origin_write_leaves_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "heart.db"
+
+    def fail(self: Store, *args: object) -> None:
+        raise RuntimeError("power cut")
+
+    monkeypatch.setattr(Store, "write_origin", fail)
+    with pytest.raises(RuntimeError, match="power cut"):
+        Kernel.create(path, plain_seed())
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_create_refuses_an_existing_heart_and_leaves_it_intact(tmp_path: Path) -> None:
