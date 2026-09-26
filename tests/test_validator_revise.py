@@ -121,10 +121,10 @@ def test_a_revision_must_change_something_inf4(heart: Harness, formed: tuple[str
     assert result.rules == {"INF-4"}
 
 
-def test_a_trust_change_needs_evidence_rol4(heart: Harness, formed: tuple[str, str]) -> None:
+def test_a_trust_change_needs_evidence_evd4(heart: Harness, formed: tuple[str, str]) -> None:
     _, infon_id = formed
     body = replace(infon_body(heart.store, infon_id), confidence=Decimal("0.9"))
-    assert rejected(heart.propose(ReviseInfon(infon_id, 1, body, ()))).rules == {"ROL-4"}
+    assert rejected(heart.propose(ReviseInfon(infon_id, 1, body, ()))).rules == {"EVD-4"}
 
 
 def test_a_trust_change_needs_new_evidence_not_already_cited(
@@ -135,7 +135,7 @@ def test_a_trust_change_needs_new_evidence_not_already_cited(
     # `observation` already grounds this Infon (it is its derivation_input);
     # its root is already in the issue's ledger, so citing it again is not new.
     result = rejected(heart.propose(ReviseInfon(infon_id, 1, body, _support(observation))))
-    assert result.rules == {"ROL-4"}
+    assert result.rules == {"EVD-4"}
 
 
 def test_a_stale_version_is_rejected_per6(heart: Harness, formed: tuple[str, str]) -> None:
@@ -195,13 +195,35 @@ def test_a_revision_derives_from_the_version_it_revises(
     assert any(item.ref == ObjectRef(evidence, 1) and item.role is Role.SUPPORT for item in revision.inputs)
 
 
-def test_an_infon_is_not_evidence_for_its_own_revision_evd4(
+def test_citing_only_the_target_itself_carries_no_novel_root_evd4(
     heart: Harness, formed: tuple[str, str]
 ) -> None:
+    """§4.3 replaces E000's special-cased self-citation check entirely: there
+    is no rule against citing the target (or any Infon on the same issue) as
+    evidence. It is refused only because its root is already in the issue's
+    ledger, so it can never be novel (EVD-4) — the general novelty math, not
+    a special case."""
     _, infon_id = formed
     body = replace(infon_body(heart.store, infon_id), confidence=Decimal("0.9"))
     result = rejected(heart.propose(ReviseInfon(infon_id, 1, body, _support(infon_id))))
     assert result.rules == {"EVD-4"}
+
+
+def test_citing_the_target_alongside_genuinely_new_evidence_is_accepted(
+    heart: Harness, formed: tuple[str, str]
+) -> None:
+    """The mixed case §4.3 exists to allow: citing the target contributes
+    nothing, but the proposal also carries a genuinely novel root, and
+    NovelRoots is a set union — one novel member is enough."""
+    _, infon_id = formed
+    evidence = heart.receive()
+    body = replace(infon_body(heart.store, infon_id), confidence=Decimal("0.9"))
+    result = heart.commit(
+        Consolidate(evidence),
+        ReviseInfon(infon_id, 1, body, (RoleInput(infon_id, Role.SUPPORT), *_support(evidence))),
+    )
+    check = next(c for c in result.justification if c.rule == "EVD-7")
+    assert check.measured["novel"] == [{"kind": "observation", "key": evidence}]
 
 
 def test_administratively_revising_the_witness_creates_no_new_root(
@@ -222,7 +244,7 @@ def test_administratively_revising_the_witness_creates_no_new_root(
 
     again = replace(lowered, confidence=Decimal("0.5"))
     stale = rejected(heart.propose(ReviseInfon(infon_id, 2, again, _counterevidence(witness_id))))
-    assert stale.rules == {"ROL-4"}
+    assert stale.rules == {"EVD-4"}
 
 
 def test_new_grounding_reaches_through_a_revised_witness(
@@ -274,7 +296,7 @@ def test_evidence_cited_by_any_earlier_version_is_not_new(
     # it again is not new.
     raised = replace(lowered, confidence=Decimal("0.9"))
     result = rejected(heart.propose(ReviseInfon(infon_id, 2, raised, _support(observation))))
-    assert result.rules == {"ROL-4"}
+    assert result.rules == {"EVD-4"}
 
 
 def test_true_is_different_content_from_one_inf4(heart: Harness) -> None:

@@ -8,6 +8,7 @@ from entelechy.foundation.canonical import parse
 from entelechy.foundation.types import (
     Consolidate,
     EventType,
+    Forget,
     FormInfon,
     InfonBody,
     InfonStatus,
@@ -236,12 +237,24 @@ def test_context_must_be_canonical_inf1(heart: Harness) -> None:
     [
         ("PROPOSE_MODEL", UNIMPLEMENTED),
         ("RECORD_RESOURCE_THRESHOLD", UNIMPLEMENTED),
-        ("FORM_INFON", "TRN-1"),
+        ("FORM_INFON", "TRN-2"),
+        ("CONSOLIDATE", "TRN-2"),
         ("DREAM", "TRN-1"),
     ],
 )
 def test_operations_outside_v1_are_rejected_by_name(heart: Harness, name: str, rule: str) -> None:
     assert rejected(heart.propose(OtherOperation(name))).rules == {rule}
+
+
+def test_a_revision_of_an_unknown_infon_is_rejected_trn3(heart: Harness) -> None:
+    placeholder = InfonBody("R1", (), Polarity.POSITIVE, {}, Decimal("0.6"), InfonStatus.ACTIVE)
+    result = rejected(heart.propose(ReviseInfon("infon:ghost", 1, placeholder, ())))
+    assert result.rules == {"TRN-3"}
+
+
+def test_forgetting_an_unknown_object_is_rejected_trn3(heart: Harness) -> None:
+    result = rejected(heart.propose(Forget("infon:ghost", 1, "gone already")))
+    assert result.rules == {"TRN-3"}
 
 
 def test_rejections_read_as_rules_and_reasons(heart: Harness) -> None:
@@ -262,7 +275,10 @@ def test_validation_does_not_touch_the_store(heart: Harness) -> None:
 # Issues (ISS) and evidence accounting (EVD), FOUNDATIONS §8.14.
 
 
-def test_first_formation_is_allowed_even_when_rootless_iss4(heart: Harness) -> None:
+def test_first_formation_from_testimony_is_allowed_unconditionally_iss4(heart: Harness) -> None:
+    """First formation is allowed whether or not it is rootless (ISS-4); this
+    exercises the grounded case (organ testimony). The rootless case (an
+    attributed-only formation) is case 24 in tests/test_conformance.py."""
     infon = form_testimony(heart.manifest.self_id)
     result = accepted(heart.propose(infon))
     check = next(c for c in result.justification if c.rule == "EVD-7")
@@ -337,11 +353,13 @@ def test_a_mind_cannot_fabricate_another_organs_testimony_root_law8_rot2(heart: 
     assert not hasattr(infon, "organ") and not hasattr(infon, "source")
 
 
-def test_a_real_root_need_not_be_relevant_evidence_case25(heart: Harness) -> None:
+def test_a_real_root_need_not_be_relevant_evidence_at_formation(heart: Harness) -> None:
     """E001 guarantees a root is real (it came through a capability-bound
     port); it does not, and by design cannot, judge whether that evidence is
     actually probative of the claim it is cited for (ROL-5). An Observation
-    about anything at all still grounds a `support` role for any claim."""
+    about anything at all still grounds a `derivation_input` at formation.
+    The relevance boundary reached by relabeling a role at revision time is
+    case 25 in tests/test_conformance.py."""
     weather = heart.receive(content={"topic": "weather", "reading": "sunny"})
     unrelated_claim = FormInfon(
         relation="R1",

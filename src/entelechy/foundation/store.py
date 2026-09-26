@@ -627,3 +627,12 @@ class Store:
                 "SELECT seq, idx, type, object_id FROM events ORDER BY seq, idx"
             )
         ]
+
+    def issues(self) -> list[IssueRow]:
+        """Every Infon's IssueDigest, in a stable order (INF-7). Part of Heart structure."""
+        return [
+            IssueRow(object_id, issue_digest)
+            for object_id, issue_digest in self._conn.execute(
+                "SELECT object_id, issue_digest FROM infon_issues ORDER BY object_id"
+            )
+        ]

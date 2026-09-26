@@ -323,7 +323,7 @@ class Validator:
         provenance = Provenance(
             id=self._new_id("prov"),
             mode=Mode.SELF_OBSERVATION
-            if self._manifest.is_interoceptive(observation.channel.id)
+            if self._manifest.is_interoceptive(observation.channel)
             else Mode.OBSERVATION,
             inputs=(),
             operation=Operation.CONSOLIDATE,
@@ -553,7 +553,7 @@ class Validator:
     ) -> list[Violation]:
         header = work.latest(op.infon_id)
         if header is None:
-            return [_missing("PER-6", "Infon", op.infon_id, work)]
+            return [_missing("TRN-3", "Infon", op.infon_id, work)]
         if header.type is ObjectType.OBSERVATION:
             return [Violation("OBS-1", "Observations are never edited; revise the Infons instead")]
         if header.type is not ObjectType.INFON:
@@ -624,8 +624,6 @@ class Validator:
                 )
         resolved, evidence_violations = _resolve_role_inputs(op.evidence, work)
         violations += evidence_violations
-        if any(item.ref.id == header.id for item in resolved):
-            violations.append(Violation("EVD-4", "an Infon cannot be evidence for its own revision"))
         if violations:
             return violations
 
@@ -671,11 +669,18 @@ class Validator:
             candidate_counterevidence = roots_of_many(counterevidence, work)
             novel_support = novel_roots(candidate_support, inherited)
             novel_counterevidence = novel_roots(candidate_counterevidence, inherited)
-            if direction == "up" and not novel_support:
+            # EVD-4 asks whether there is new evidence at all; ROL-4 asks,
+            # only once EVD-4 is satisfied, whether it is on the side the
+            # direction requires. Citing the target, or anything else already
+            # in the issue's ledger, fails EVD-4 by itself (§4.3): there is
+            # nothing special-cased about self-citation.
+            if not (novel_support or novel_counterevidence):
+                violations.append(Violation("EVD-4", "a trust change requires new evidence"))
+            elif direction == "up" and not novel_support:
                 violations.append(
                     Violation("ROL-4", "an upward change requires a novel root from a support input")
                 )
-            if direction == "down" and not novel_counterevidence:
+            elif direction == "down" and not novel_counterevidence:
                 violations.append(
                     Violation(
                         "ROL-4",
@@ -737,7 +742,7 @@ class Validator:
         if header is None:
             if op.object_id in work.transient:
                 return [Violation("MEM-3", "transient state lapses on its own; FORGET is for the Heart")]
-            return [Violation("MEM-3", f"there is no persistent object {op.object_id}")]
+            return [Violation("TRN-3", f"there is no persistent object {op.object_id}")]
         provenance = work.provenance_of(header.provenance_id)
         if provenance is not None and provenance.mode is Mode.ORIGIN:
             return [Violation("MEM-4", "seed structure cannot be forgotten")]
@@ -780,7 +785,7 @@ class Validator:
 
     def _other(self, op: OtherOperation) -> list[Violation]:
         if op.name in {operation.value for operation in V1_OPERATIONS}:
-            return [Violation("TRN-1", f"{op.name} must be proposed with its typed operation")]
+            return [Violation("TRN-2", f"{op.name} must be proposed with its typed operation")]
         if op.name in {operation.value for operation in Operation}:
             return [Violation(UNIMPLEMENTED, f"{op.name} is legal in FOUNDATIONS but not built in v1")]
         return [Violation("TRN-1", f"{op.name} is not a legal operation")]

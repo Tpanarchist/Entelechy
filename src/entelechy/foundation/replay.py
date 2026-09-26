@@ -10,8 +10,9 @@ from entelechy.foundation.canonical import CanonicalError, Json, digest_of, pars
 from entelechy.foundation.evidence import (
     Root,
     classify,
-    ledger,
+    ledger as _ledger_of,
     novel_roots,
+    roots_of,
     roots_of_many,
     testimony_root,
 )
@@ -23,6 +24,7 @@ from entelechy.foundation.types import (
     InfonBody,
     Mode,
     ObjectHeader,
+    ObjectRef,
     ObjectType,
     Role,
     Rows,
@@ -39,12 +41,17 @@ class IntegrityError(Exception):
 
 
 def heart_digest(store: Store) -> str:
-    """Digest of structure: every version header, provenance record and event."""
+    """Digest of structure: every version header, provenance record, event and
+    issue row. `infon_issues` is part of Heart structure (INF-7, ISS-2): it is
+    what `classify()` and `Ledger(K)` read, so a live table that has drifted
+    from lineage must be as visible here as a drifted `object_versions` row.
+    """
     return digest_of(
         {
             "versions": [header.to_canonical() for header in store.versions()],
             "provenance": [item.to_canonical() for item in store.all_provenance()],
             "events": [event.to_canonical() for event in store.events()],
+            "issues": [row.to_canonical() for row in store.issues()],
         }
     )
 
@@ -132,16 +139,45 @@ def _audit_and_apply(record: Json, rows: Rows, reader: Store) -> None:
     for op_index, operation_entry_raw in enumerate(operations):
         operation_entry = expect_object(operation_entry_raw, "operations[i]")
         operation_name = _text(operation_entry, "operation")
+        object_id = _text(operation_entry, "object")
         version = next(versions)
         this_provenance = None if operation_name == "FORGET" else next(provenance)
         this_issue = next(issues) if operation_name == "FORM_INFON" else None
 
-        for check in justification_by_op.get(op_index, []):
+        # EVD-7: a FORM_INFON or REVISE_INFON MUST carry exactly one check;
+        # every other operation MUST carry none. A deleted or duplicated
+        # check is refused here, before it can be silently skipped or
+        # silently accepted (§5 of the E001 spec).
+        checks = justification_by_op.pop(op_index, [])
+        evd7_applies = operation_name in ("FORM_INFON", "REVISE_INFON")
+        if evd7_applies and len(checks) != 1:
+            raise IntegrityError(
+                f"operation {op_index} ({operation_name}) must carry exactly one "
+                f"EVD-7 check; found {len(checks)}"
+            )
+        if not evd7_applies and checks:
+            raise IntegrityError(
+                f"operation {op_index} ({operation_name}) must not carry an EVD-7 check"
+            )
+
+        for check in checks:
             measured = expect_object(field_of(check, "measured"), "justification.measured")
             issue = _text(measured, "issue")
             assert this_provenance is not None
-            inherited = ledger(issue, reader)
+            inherited = _ledger_of(issue, reader)
             if operation_name == "FORM_INFON":
+                # INF-7/ISS-2: the IssueRow this transition admits for the
+                # formed object must name that same object and issue — not
+                # some other one the live infon_issues table might carry.
+                if this_issue is None or this_issue.object_id != object_id:
+                    raise IntegrityError(
+                        f"FORM_INFON of {object_id} carries no matching IssueRow (INF-7)"
+                    )
+                if this_issue.issue_digest != issue:
+                    raise IntegrityError(
+                        f"the IssueRow for {object_id} names a different issue than its "
+                        "own EVD-7 justification (INF-7/ISS-2)"
+                    )
                 classification = classify(issue, reader)
                 if classification.value != measured.get("classification"):
                     raise IntegrityError(
@@ -179,11 +215,22 @@ def _audit_and_apply(record: Json, rows: Rows, reader: Store) -> None:
                 issues=() if this_issue is None else (this_issue,),
             )
         )
+        _audit_iss3(reader)
+    if justification_by_op:
+        raise IntegrityError(
+            f"EVD-7 checks reference operations that do not exist: {sorted(justification_by_op)}"
+        )
     reader.apply_replayed(Rows(provenance=(), versions=(), events=rows.events, issues=()))
 
 
 def _audit_iss3(reader: Store) -> None:
-    """ISS-3: every issue has at most one current head, checked over the final state."""
+    """ISS-3: every issue has at most one current head, at every point in lineage.
+
+    Called after every operation `_audit_and_apply` applies (and once more
+    after the whole rebuild), not only once at the end: a history that ever
+    held two current heads for one issue is invalid even if a later
+    transition retires one of them and the final state looks clean.
+    """
     issues: dict[str, list[str]] = {}
     for header in reader.versions():
         if header.type is not ObjectType.INFON or header.version != 1:
@@ -249,22 +296,66 @@ class HeartView:
             latest[header.id] = header
         return [h for h in latest.values() if object_type is None or h.type is object_type]
 
-    def body(self, object_id: str) -> Json | Stub | None:
-        header = self.latest(object_id)
+    def body(self, object_id: str, version: int | None = None) -> Json | Stub | None:
+        """The PER-8 read path: any prior version, not only the latest."""
+        if version is None:
+            header = self.latest(object_id)
+            missing_is_stub = False
+        else:
+            header = self._structure.header_at(ObjectRef(object_id, version))
+            missing_is_stub = True
         if header is None:
             return None
         if header.forgotten or object_id in self._forgotten_later:
             return Stub.CONTENT_FORGOTTEN
         data = self._content.content(header.body_digest)
-        if data is None or not verify(data, header.body_digest):
+        if data is None:
+            # A historical (non-latest) version's own header never gets
+            # `forgotten` set — only the version FORGET itself produced does
+            # (MEM-3) — yet FORGET purges every digest that version ever
+            # used (unless another live object still needs it). Missing
+            # content here is that, not corruption.
+            if missing_is_stub:
+                return Stub.CONTENT_FORGOTTEN
+            raise IntegrityError(f"content of {object_id} is missing or altered")
+        if not verify(data, header.body_digest):
             raise IntegrityError(f"content of {object_id} is missing or altered")
         return parse(data)
 
-    def infon(self, object_id: str) -> InfonBody | Stub | None:
-        body = self.body(object_id)
+    def infon(self, object_id: str, version: int | None = None) -> InfonBody | Stub | None:
+        body = self.body(object_id, version)
         if body is None or isinstance(body, Stub):
             return body
         return InfonBody.from_canonical(body)
+
+    def roots(self, object_id: str, version: int | None = None) -> frozenset[Root]:
+        """Roots(x@v) (ROT-6/ROT-7), recomputed on demand, never stored."""
+        header = self.latest(object_id) if version is None else self._structure.header_at(
+            ObjectRef(object_id, version)
+        )
+        if header is None:
+            raise ValueError(f"no such object version {object_id}@{version}")
+        return roots_of(header.ref(), self._structure)
+
+    def grounded(self, object_id: str, version: int | None = None) -> bool:
+        """grounded(x@v) := Roots(x@v) != empty (ROT-8)."""
+        return bool(self.roots(object_id, version))
+
+    def issue(self, object_id: str) -> str | None:
+        """The IssueDigest an Infon was formed with (INF-7, ISS-2), or None."""
+        return self._structure.issue_of(object_id)
+
+    def head(self, issue: str) -> str | None:
+        """The current head of `issue` (ISS-3): its id, or None if it has none."""
+        for object_id in self._structure.infon_ids_for_issue(issue):
+            latest = self._structure.latest(object_id)
+            if latest is not None and latest.retired_by is None and not latest.forgotten:
+                return object_id
+        return None
+
+    def ledger(self, issue: str) -> frozenset[Root]:
+        """Ledger(K) (ISS-7): every root ever admitted into this issue's history."""
+        return _ledger_of(issue, self._structure)
 
     def events(self) -> list[EventRow]:
         return self._structure.events()

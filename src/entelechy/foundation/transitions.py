@@ -25,7 +25,7 @@ from entelechy.foundation.types import (
     field_of,
 )
 
-RECORD_SCHEMA = 1
+RECORD_SCHEMA = 2
 
 
 class RecordError(ValueError):

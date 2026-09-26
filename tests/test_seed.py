@@ -32,11 +32,11 @@ def test_manifest_round_trips() -> None:
 
 
 def test_interoceptive_channels_round_trip_int1() -> None:
-    spec = SeedSpec(("R1",), (EYE,), (MIND,), interoceptive_channels=("eye",))
+    spec = SeedSpec(("R1",), (EYE,), (MIND,), interoceptive=(EYE,))
     manifest = manifest_for(spec, "omega-1")
     assert Manifest.from_bytes(manifest.to_bytes()) == manifest
-    assert manifest.is_interoceptive("eye")
-    assert not manifest.is_interoceptive("mind")
+    assert manifest.is_interoceptive(EYE)
+    assert not manifest.is_interoceptive(MIND)
 
 
 def test_manifest_lists_the_seed_objects_dev1() -> None:
@@ -85,12 +85,12 @@ def test_seed_heart_is_rebuilt_exactly_from_the_manifest_dev2() -> None:
             "canonical form",
         ),
         (
-            SeedSpec(("R1",), (EYE,), (MIND,), interoceptive_channels=("ear",)),
-            "interoceptive_channels",
+            SeedSpec(("R1",), (EYE,), (MIND,), interoceptive=(OrganRef("ear", "1"),)),
+            "interoceptive",
         ),
         (
-            SeedSpec(("R1",), (EYE,), (MIND,), interoceptive_channels=("eye", "eye")),
-            "interoceptive_channels",
+            SeedSpec(("R1",), (EYE,), (MIND,), interoceptive=(EYE, EYE)),
+            "interoceptive",
         ),
     ],
 )
